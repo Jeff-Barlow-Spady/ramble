@@ -113,9 +113,14 @@ func (t *ExecutableTranscriber) Transcribe(audioData []float32) (string, error) 
 		logger.Debug(logger.CategoryTranscription, "Transcribing %d audio samples with executable", len(audioData))
 	}
 
-	// Create a temporary directory for the WAV file
-	tempDir, err := os.MkdirTemp("", "ramble-whisper-*")
+	// Create a temporary directory in the user's home folder
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
+		return "", fmt.Errorf("failed to get user home directory: %w", err)
+	}
+
+	tempDir := filepath.Join(homeDir, ".local", "share", "ramble", "temp")
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
@@ -160,9 +165,10 @@ func (t *ExecutableTranscriber) ProcessAudioChunk(audioData []float32) (string, 
 	// Append new audio data to our buffer
 	t.audioBuffer = append(t.audioBuffer, audioData...)
 
-	// Only process if we have enough data or enough time has passed
-	shouldProcess := len(t.audioBuffer) >= 16000*2 || // At least 2 seconds of audio
-		time.Since(t.lastProcessed) > 3*time.Second // Or 3 seconds since last processing
+	// Process more frequently - every 500ms of audio or 500ms of time
+	// This ensures a more responsive feeling while transcribing
+	shouldProcess := len(t.audioBuffer) >= 16000/2 || // 500ms of audio
+		time.Since(t.lastProcessed) > 500*time.Millisecond
 
 	if !shouldProcess {
 		t.mu.Unlock()
@@ -180,11 +186,6 @@ func (t *ExecutableTranscriber) ProcessAudioChunk(audioData []float32) (string, 
 	t.mu.Unlock()
 
 	// Process the audio data
-	if t.config.Debug {
-		logger.Debug(logger.CategoryTranscription, "Processing audio chunk with %d samples", len(bufferCopy))
-	}
-
-	// Call the main transcribe method
 	text, err := t.Transcribe(bufferCopy)
 	if err != nil {
 		return "", fmt.Errorf("error transcribing audio: %w", err)

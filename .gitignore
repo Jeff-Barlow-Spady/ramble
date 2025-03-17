@@ -1,0 +1,68 @@
+# Go specific ignores
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+
+# Build and binary directories
+/bin/
+/build/
+/dist/
+
+# Dependency directories
+/vendor/
+/Godeps/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Ramble specific
+# Audio recording temporary files
+*.wav
+*.raw
+*.pcm
+
+# Downloaded whisper models
+*.bin
+/models/
+
+# Log files
+*.log
+/logs/
+
+# User preferences and settings
+*.conf
+user_config.json
+
+# Temporary files
+/tmp/
+*.tmp
+
+# Build and packaging artifacts
+/ramble
+/ramble.exe
+/ramble.app/
+*.syso
+*.ico
+*.icns
+*.rc
+*.manifest
+/fyne-cross/
+
+# Generated resources
+*-packr.go
+packrd/
+rice-box.go
+
+# System tray icon cache
+.systray_cache/

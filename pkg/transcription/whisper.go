@@ -3,7 +3,10 @@ package transcription
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 
@@ -33,16 +36,19 @@ type Config struct {
 	Debug bool
 	// Path to the executable (if empty, auto-detected)
 	ExecutablePath string
+	// Whether to prefer system-installed whisper executables over auto-installation
+	PreferSystemExecutable bool
 }
 
 // DefaultConfig returns a reasonable default configuration
 func DefaultConfig() Config {
 	return Config{
-		ModelSize:      ModelSmall, // Small is a good balance of accuracy and performance
-		ModelPath:      "",         // Use default location
-		Language:       "",         // Auto-detect language
-		Debug:          false,
-		ExecutablePath: "", // Auto-detect executable
+		ModelSize:              ModelSmall, // Small is a good balance of accuracy and performance
+		ModelPath:              "",         // Use default location
+		Language:               "",         // Auto-detect language
+		Debug:                  false,
+		ExecutablePath:         "",   // Auto-detect executable
+		PreferSystemExecutable: true, // By default, prefer system-installed executables
 	}
 }
 
@@ -67,7 +73,7 @@ type ConfigurableTranscriber interface {
 func NewTranscriber(config Config) (Transcriber, error) {
 	// Ensure model path is set
 	if config.ModelPath == "" {
-		config.ModelPath = getDefaultModelPath()
+		config.ModelPath = getModelPath("", config.ModelSize)
 	}
 
 	// Ensure model directory exists
@@ -75,44 +81,65 @@ func NewTranscriber(config Config) (Transcriber, error) {
 		return nil, fmt.Errorf("failed to create model directory: %w", err)
 	}
 
-	// First check if we can use the executable transcriber
-	if config.ExecutablePath == "" {
-		// Try to find executable
-		if execPath, err := findWhisperExecutable(); err == nil {
-			// We found a whisper executable, use it
-			execType := detectExecutableType(execPath)
-			logger.Info(logger.CategoryTranscription,
-				"Found whisper executable: %s (type: %s)", execPath, getExecutableTypeName(execType))
-
-			config.ExecutablePath = execPath
-		}
-	}
-
-	// If we have an executable path, use it
+	// If a specific executable path is provided, use it directly
 	if config.ExecutablePath != "" {
-		return NewExecutableTranscriber(config)
+		if _, err := os.Stat(config.ExecutablePath); err == nil {
+			logger.Info(logger.CategoryTranscription, "Using specified whisper executable: %s", config.ExecutablePath)
+			return NewExecutableTranscriber(config)
+		}
+		return nil, fmt.Errorf("specified executable not found: %s", config.ExecutablePath)
 	}
 
-	// No executable found, check if platform is supported for auto-install
-	if !isWhisperInstallSupported() {
-		// If we can't use or find a whisper executable and can't install one,
+	// Try to find executable on the system
+	execPath, err := findWhisperExecutable()
+	systemExecFound := err == nil
+
+	if systemExecFound {
+		// We found a whisper executable
+		execType := detectExecutableType(execPath)
+		logger.Info(logger.CategoryTranscription,
+			"Found system whisper executable: %s (type: %s)", execPath, getExecutableTypeName(execType))
+
+		// If we prefer system executables or auto-install is not supported, use this executable
+		if config.PreferSystemExecutable || !isWhisperInstallSupported() {
+			config.ExecutablePath = execPath
+			return NewExecutableTranscriber(config)
+		}
+
+		// Otherwise, we'll still keep it as a fallback option
+	}
+
+	// If auto-install is not supported or we explicitly prefer system executables,
+	// we should not try to auto-install
+	if !isWhisperInstallSupported() || (config.PreferSystemExecutable && !systemExecFound) {
+		// If we can't find a system executable and can't/shouldn't auto-install,
 		// return a placeholder transcriber
 		logger.Warning(logger.CategoryTranscription,
-			"No Whisper executable found and automatic installation not supported on %s",
-			runtime.GOOS)
+			"No Whisper executable found and automatic installation not available or disabled")
 		return &placeholderTranscriber{config: config}, nil
 	}
 
 	// Try to install whisper-cpp
-	execPath, err := installWhisperExecutable()
+	logger.Info(logger.CategoryTranscription, "Attempting to auto-install whisper.cpp...")
+	autoExecPath, err := installWhisperExecutable()
 	if err != nil {
 		logger.Warning(logger.CategoryTranscription,
-			"Failed to install Whisper executable: %v", err)
+			"Failed to auto-install Whisper executable: %v", err)
+
+		// If we found a system executable earlier, use it as fallback
+		if systemExecFound {
+			logger.Info(logger.CategoryTranscription,
+				"Using system whisper executable as fallback: %s", execPath)
+			config.ExecutablePath = execPath
+			return NewExecutableTranscriber(config)
+		}
+
 		return &placeholderTranscriber{config: config}, nil
 	}
 
 	// Set the executable path in the config
-	config.ExecutablePath = execPath
+	logger.Info(logger.CategoryTranscription, "Using auto-installed whisper executable: %s", autoExecPath)
+	config.ExecutablePath = autoExecPath
 
 	// Check if the model exists and download if needed
 	modelPath, err := ensureModel(config)
@@ -150,13 +177,82 @@ func isWhisperInstallSupported() bool {
 }
 
 // installWhisperExecutable tries to install the whisper executable
-// This is a simple placeholder - a real implementation would download
-// precompiled binaries for the current platform
 func installWhisperExecutable() (string, error) {
-	// For now, just return an error
-	// In a real implementation, this would download and extract
-	// precompiled binaries or build from source
-	return "", fmt.Errorf("automatic installation not implemented yet")
+	logger.Info(logger.CategoryTranscription, "Attempting to download and install whisper.cpp executable")
+
+	// Create installation directory
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get user home directory: %w", err)
+	}
+
+	installDir := filepath.Join(homeDir, ".local", "share", "ramble", "bin")
+	if err := os.MkdirAll(installDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create installation directory: %w", err)
+	}
+
+	// Target executable path
+	execPath := filepath.Join(installDir, "whisper-cpp")
+
+	// Potential download URLs in order of preference
+	// We try specific release URLs first, then fall back to latest
+	downloadURLs := []string{
+		// Specific version URLs
+		"https://github.com/ggerganov/whisper.cpp/releases/download/v1.5.0/whisper-linux-x64",
+		"https://github.com/ggerganov/whisper.cpp/releases/download/v1.4.2/whisper-linux-x64",
+		// Latest release fallback
+		"https://github.com/ggerganov/whisper.cpp/releases/latest/download/whisper-linux-x64",
+	}
+
+	// Try each URL until one works
+	var dlError error
+	for _, downloadURL := range downloadURLs {
+		logger.Info(logger.CategoryTranscription, "Attempting to download whisper.cpp from %s", downloadURL)
+
+		err := downloadExecutable(downloadURL, execPath)
+		if err == nil {
+			// Successful download
+			logger.Info(logger.CategoryTranscription, "Successfully installed whisper.cpp to %s", execPath)
+			return execPath, nil
+		}
+
+		dlError = err
+		logger.Warning(logger.CategoryTranscription, "Failed to download from %s: %v", downloadURL, err)
+	}
+
+	// If we get here, all downloads failed
+	return "", fmt.Errorf("all download attempts failed, last error: %w", dlError)
+}
+
+// downloadExecutable downloads an executable from a URL and saves it to the specified path
+func downloadExecutable(url string, destPath string) error {
+	// Download the executable
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP status error: %s", resp.Status)
+	}
+
+	// Create output file
+	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY, 0755) // Make it executable
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer out.Close()
+
+	// Copy the data
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		// Clean up on error
+		os.Remove(destPath)
+		return fmt.Errorf("failed to save executable: %w", err)
+	}
+
+	return nil
 }
 
 // placeholderTranscriber is a simple implementation that doesn't do real transcription

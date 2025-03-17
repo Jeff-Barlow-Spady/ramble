@@ -59,12 +59,11 @@ func NewApplication(debugMode bool) (*Application, error) {
 
 	// Initialize transcriber with default config
 	transConfig := transcription.DefaultConfig()
-	transConfig.Debug = debugMode // Enable debug logs if in debug mode
+	transConfig.Debug = debugMode             // Enable debug logs if in debug mode
+	transConfig.PreferSystemExecutable = true // Prefer system-installed executable
 
-	// If running in debug mode, use a smaller model for faster loading
-	if debugMode {
-		transConfig.ModelSize = transcription.ModelTiny
-	}
+	// No need to change model size in debug mode - use the default (small)
+	// or previously selected model
 
 	// Create the transcriber
 	transcriber, err := transcription.NewTranscriber(transConfig)

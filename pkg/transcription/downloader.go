@@ -22,7 +22,7 @@ var WhisperModelFilenames = map[ModelSize]string{
 	ModelBase:   "base.en.bin",
 	ModelSmall:  "small.en.bin",
 	ModelMedium: "medium.en.bin",
-	ModelLarge:  "large-v3.bin",
+	ModelLarge:  "large-v3.en.bin",
 }
 
 // DownloadModel downloads a Whisper model if it doesn't exist

@@ -2,6 +2,8 @@
 package ui
 
 import (
+	"image/color"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
@@ -107,14 +109,13 @@ func createMainUI(
  `
 
 	banner := widget.NewLabelWithStyle(bannerText, fyne.TextAlignCenter, fyne.TextStyle{Monospace: true})
+	banner.Wrapping = fyne.TextWrapOff
 
-	// Use a specific fixed width to ensure proper alignment
-	bannerRect := canvas.NewRectangle(theme.BackgroundColor())
-
-	// Stack the banner on top of the rectangle for proper alignment
+	// Create a container for the banner with a light background
+	bannerRect := canvas.NewRectangle(color.NRGBA{R: 40, G: 40, B: 40, A: 255})
 	bannerContainer := container.NewStack(
 		bannerRect,
-		banner,
+		container.NewPadded(banner),
 	)
 
 	// Fix the size to ensure proper alignment
