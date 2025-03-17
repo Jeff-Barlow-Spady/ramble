@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ramble
+Comment=Speech-to-Text Transcription Service
+Exec=/usr/local/bin/ramble
+Icon=ramble
+Terminal=false
+Categories=Utility;AudioVideo;
+Keywords=transcription;speech;voice;dictation;
+StartupNotify=true
