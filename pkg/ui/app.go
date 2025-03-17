@@ -9,9 +9,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
-	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -67,6 +65,9 @@ func NewWithOptions(testMode bool) *App {
 	fyneApp := app.New()
 	mainWindow := fyneApp.NewWindow("Ramble - Speech-to-Text")
 
+	// Set window size to match the screenshot
+	mainWindow.Resize(fyne.NewSize(650, 600))
+
 	// Set application icon
 	appIcon := resources.LoadAppIcon()
 	if appIcon != nil {
@@ -101,6 +102,7 @@ func NewWithOptions(testMode bool) *App {
 		app.showPreferencesDialog,
 		app.showAboutDialog,
 		app.doQuit,
+		app.showMainWindow,
 	)
 
 	app.setupUI()
@@ -150,191 +152,66 @@ func (a *App) doQuit() {
 	a.fyneApp.Quit()
 }
 
+// showMainWindow simply shows the main window
+func (a *App) showMainWindow() {
+	a.mainWindow.Show()
+}
+
 // setupUI initializes all UI components with improved styling
 func (a *App) setupUI() {
-	// Create transcript box (multi-line text)
-	a.transcriptBox = widget.NewMultiLineEntry()
-	a.transcriptBox.Wrapping = fyne.TextWrapWord
-	a.transcriptBox.SetPlaceHolder("Transcribed text will appear here")
+	// Create waveform visualizer
+	waveform := NewWaveformVisualizer(theme.PrimaryColor())
 
-	// Create status label with styled text
-	a.statusLabel = canvas.NewText("Ready", color.NRGBA{R: 180, G: 180, B: 180, A: 255})
-	a.statusLabel.TextStyle.Monospace = true
-	a.statusLabel.TextSize = 16
-
-	// Create waveform visualizer with a bright cyan color
-	waveformColor := color.RGBA{R: 0x61, G: 0xE3, B: 0xFA, A: 0xFF} // Bright cyan from popup.go
-	a.waveform = NewWaveformVisualizer(waveformColor)
-
-	// Create action buttons
-	recordButtonIcon := theme.MediaRecordIcon()
-	a.listenButton = widget.NewButtonWithIcon("Record", recordButtonIcon, func() {
-		if a.state == StateIdle {
-			a.setState(StateListening)
-			if a.onStartListening != nil {
-				a.onStartListening()
-			}
-			a.waveform.StartListening()
-			a.listenButton.SetText("Stop")
-			a.listenButton.SetIcon(theme.MediaStopIcon())
-		} else {
-			a.setState(StateIdle)
-			if a.onStopListening != nil {
-				a.onStopListening()
-			}
-			a.waveform.StopListening()
-			a.listenButton.SetText("Record")
-			a.listenButton.SetIcon(theme.MediaRecordIcon())
-		}
-	})
-	a.listenButton.Importance = widget.HighImportance // Make the button stand out
-
-	a.copyButton = widget.NewButton("Copy to Clipboard", func() {
-		text := a.transcriptBox.Text
-		if text != "" {
-			err := clipboard.SetText(text)
-			if err != nil {
-				a.showError("Clipboard Error", fmt.Sprintf("Failed to copy text: %v", err))
-			} else {
-				a.setStatus("Text copied to clipboard")
-			}
-		}
-	})
-
-	a.clearButton = widget.NewButton("Clear", func() {
-		a.transcriptBox.SetText("")
-		if a.onClearTranscript != nil {
-			a.onClearTranscript()
-		}
-	})
-
-	// Add preferences button
-	prefsButton := widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
-		a.showPreferencesDialog()
-	})
-	prefsButton.Importance = widget.LowImportance
-
-	// Create headers and title styling from popup.go
-	title := widget.NewLabelWithStyle("Ramble", fyne.TextAlignCenter, fyne.TextStyle{Bold: true, Monospace: true})
-	subtitle := widget.NewLabelWithStyle("Speech-to-Text Service", fyne.TextAlignCenter, fyne.TextStyle{Monospace: true})
-	version := widget.NewLabelWithStyle("v0.1.0", fyne.TextAlignCenter, fyne.TextStyle{Monospace: true})
-
-	header := container.NewVBox(
-		title,
-		subtitle,
-		version,
+	// Create UI components
+	components := CreateUI(
+		a.toggleListenState,
+		a.clearTranscript,
+		a.copyTranscript,
+		waveform,
 	)
 
-	// Create audio section with terminal-like styling
-	audioTitle := widget.NewLabelWithStyle("Audio Level", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true})
+	// Store references to components
+	a.transcriptBox = components.TranscriptBox
+	a.listenButton = components.ListenButton
+	a.clearButton = components.ClearButton
+	a.copyButton = components.CopyButton
+	a.statusLabel = components.StatusLabel
+	a.waveform = waveform
 
-	// Create waveform container with a darkened background
-	waveformBg := canvas.NewRectangle(color.NRGBA{R: 30, G: 30, B: 46, A: 255})
-	waveformContainer := container.NewStack(
-		waveformBg,
-		container.NewPadded(a.waveform),
-	)
+	// Set the window content
+	a.mainWindow.SetContent(components.MainContent)
 
-	// Set minimum size for waveform
-	waveformContainer.Resize(fyne.NewSize(600, 100))
-
-	// Create audio container with title
-	audioContainer := container.NewBorder(
-		audioTitle,
-		nil,
-		nil,
-		nil,
-		container.NewPadded(waveformContainer),
-	)
-
-	// Create transcription section with terminal-like styling
-	transcriptTitle := widget.NewLabelWithStyle("Transcription", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true})
-
-	// Style the transcript box with a dark background
-	transcriptBg := canvas.NewRectangle(color.NRGBA{R: 30, G: 30, B: 46, A: 255})
-	scrollText := container.NewScroll(a.transcriptBox)
-	scrollText.SetMinSize(fyne.NewSize(0, 150))
-
-	styledTranscript := container.NewStack(
-		transcriptBg,
-		container.NewPadded(scrollText),
-	)
-
-	transcriptionContainer := container.NewBorder(
-		transcriptTitle,
-		nil,
-		nil,
-		nil,
-		container.NewPadded(styledTranscript),
-	)
-
-	// Controls section
-	controlsContainer := container.NewHBox(
-		a.listenButton,
-		a.copyButton,
-		a.clearButton,
-		layout.NewSpacer(),
-		widget.NewLabelWithStyle("Keyboard: 'R' to toggle recording", fyne.TextAlignTrailing, fyne.TextStyle{Monospace: true}),
-		prefsButton,
-	)
-
-	// Create main content with a dark background
-	mainBg := canvas.NewRectangle(color.NRGBA{R: 20, G: 20, B: 30, A: 255})
-
-	// Create a container for the status indicator
-	statusContainer := container.NewHBox(
-		a.statusLabel,
-	)
-
-	// Layout all components with terminal-like styling
-	content := container.NewStack(
-		mainBg,
-		container.NewPadded(
-			container.NewBorder(
-				container.NewVBox(
-					container.NewPadded(header),
-					audioContainer,
-				),
-				container.NewVBox(
-					container.NewPadded(controlsContainer),
-					container.NewPadded(statusContainer),
-				),
-				nil,
-				nil,
-				transcriptionContainer,
-			),
-		),
-	)
-
-	// Handle key presses globally with direct event handler
+	// Set up key press handling
 	a.keyHandlerEnabled = true
-	a.mainWindow.Canvas().SetOnTypedKey(func(event *fyne.KeyEvent) {
-		// Simpler approach without delays that could cause issues
-		if event.Name == "R" || event.Name == "r" {
-			// Only handle keypress if we're not already processing one
-			if a.keyHandlerEnabled {
-				a.keyHandlerEnabled = false
-				// Use the same logic as the button click
-				if a.state == StateIdle {
-					a.setState(StateListening)
-					if a.onStartListening != nil {
-						a.onStartListening()
-					}
-					a.waveform.StartListening()
-					a.listenButton.SetText("Stop")
-					a.listenButton.SetIcon(theme.MediaStopIcon())
-				} else {
-					a.setState(StateIdle)
-					if a.onStopListening != nil {
-						a.onStopListening()
-					}
-					a.waveform.StopListening()
-					a.listenButton.SetText("Record")
-					a.listenButton.SetIcon(theme.MediaRecordIcon())
+	a.mainWindow.Canvas().SetOnTypedKey(func(ke *fyne.KeyEvent) {
+		// Handle key presses
+		if !a.keyHandlerEnabled {
+			return
+		}
+
+		// Toggle recording state with 'r' key
+		if ke.Name == fyne.KeyR {
+			a.keyHandlerEnabled = false // Temporarily disable to prevent rapid toggling
+
+			if a.state == StateIdle {
+				a.setState(StateListening)
+				if a.onStartListening != nil {
+					a.onStartListening()
 				}
-				// Re-enable immediately after toggling
-				a.keyHandlerEnabled = true
+				a.waveform.StartListening()
+				a.listenButton.SetText("Stop")
+				a.listenButton.SetIcon(theme.MediaStopIcon())
+			} else {
+				a.setState(StateIdle)
+				if a.onStopListening != nil {
+					a.onStopListening()
+				}
+				a.waveform.StopListening()
+				a.listenButton.SetText("Record")
+				a.listenButton.SetIcon(theme.MediaRecordIcon())
 			}
+			// Re-enable immediately after toggling
+			a.keyHandlerEnabled = true
 		}
 	})
 
@@ -344,9 +221,6 @@ func (a *App) setupUI() {
 			a.onQuit()
 		}
 	})
-
-	a.mainWindow.SetContent(content)
-	a.mainWindow.Resize(fyne.NewSize(650, 600)) // Slightly larger for the improved UI
 }
 
 // Run starts the UI event loop
@@ -454,4 +328,46 @@ func (a *App) ShowTemporaryStatus(status string, duration time.Duration) {
 // GetPreferences returns the current preferences
 func (a *App) GetPreferences() Preferences {
 	return a.currentPreferences
+}
+
+// copyTranscript copies the transcript text to clipboard
+func (a *App) copyTranscript() {
+	text := a.transcriptBox.Text
+	if text != "" {
+		err := clipboard.SetText(text)
+		if err != nil {
+			a.showError("Clipboard Error", fmt.Sprintf("Failed to copy text: %v", err))
+		} else {
+			a.setStatus("Text copied to clipboard")
+		}
+	}
+}
+
+// clearTranscript clears the transcript text
+func (a *App) clearTranscript() {
+	a.transcriptBox.SetText("")
+	if a.onClearTranscript != nil {
+		a.onClearTranscript()
+	}
+}
+
+// toggleListenState toggles between listening and idle states
+func (a *App) toggleListenState() {
+	if a.state == StateIdle {
+		a.setState(StateListening)
+		if a.onStartListening != nil {
+			a.onStartListening()
+		}
+		a.waveform.StartListening()
+		a.listenButton.SetText("Stop")
+		a.listenButton.SetIcon(theme.MediaStopIcon())
+	} else {
+		a.setState(StateIdle)
+		if a.onStopListening != nil {
+			a.onStopListening()
+		}
+		a.waveform.StopListening()
+		a.listenButton.SetText("Record")
+		a.listenButton.SetIcon(theme.MediaRecordIcon())
+	}
 }

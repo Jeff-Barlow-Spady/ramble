@@ -22,6 +22,10 @@ type SystemTray struct {
 	mPreferences *systray.MenuItem
 	mAbout       *systray.MenuItem
 	mQuit        *systray.MenuItem
+	mShowWindow  *systray.MenuItem
+
+	// Callbacks
+	onShowWindow func()
 }
 
 // NewSystemTray creates a new system tray icon
@@ -46,19 +50,18 @@ func NewSystemTray(testMode bool) *SystemTray {
 }
 
 // SetCallbacks sets callbacks for systray menu items
-func (s *SystemTray) SetCallbacks(onStartStop, onPrefs, onAbout, onQuit func()) {
-	if onStartStop != nil {
-		s.onStartStop = onStartStop
-	}
-	if onPrefs != nil {
-		s.onPrefsClick = onPrefs
-	}
-	if onAbout != nil {
-		s.onAboutClick = onAbout
-	}
-	if onQuit != nil {
-		s.onQuitClick = onQuit
-	}
+func (s *SystemTray) SetCallbacks(
+	onStartStop func(),
+	onPrefsClick func(),
+	onAboutClick func(),
+	onQuitClick func(),
+	onShowWindow func(),
+) {
+	s.onStartStop = onStartStop
+	s.onPrefsClick = onPrefsClick
+	s.onAboutClick = onAboutClick
+	s.onQuitClick = onQuitClick
+	s.onShowWindow = onShowWindow
 }
 
 // Start initializes the system tray icon
@@ -112,6 +115,7 @@ func (s *SystemTray) onReady() {
 
 	// Create menu items
 	s.mStartStop = systray.AddMenuItem("Start Recording", "Start/Stop speech recording")
+	s.mShowWindow = systray.AddMenuItem("Show Window", "Show the main application window")
 	systray.AddSeparator()
 	s.mPreferences = systray.AddMenuItem("Preferences", "Configure Ramble")
 	s.mAbout = systray.AddMenuItem("About", "About Ramble")
@@ -123,6 +127,10 @@ func (s *SystemTray) onReady() {
 			select {
 			case <-s.mStartStop.ClickedCh:
 				s.onStartStop()
+			case <-s.mShowWindow.ClickedCh:
+				if s.onShowWindow != nil {
+					s.onShowWindow()
+				}
 			case <-s.mPreferences.ClickedCh:
 				s.onPrefsClick()
 			case <-s.mAbout.ClickedCh:

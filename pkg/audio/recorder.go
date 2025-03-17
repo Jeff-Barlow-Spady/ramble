@@ -4,11 +4,11 @@ package audio
 import (
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 
 	"github.com/gordonklaus/portaudio"
+	"github.com/jeff-barlow-spady/ramble/pkg/logger"
 )
 
 // Configuration for audio recording
@@ -57,15 +57,15 @@ func NewRecorder(config Config) (*Recorder, error) {
 	err := portaudio.Initialize()
 	if err != nil {
 		if config.Debug {
-			log.Printf("PortAudio initialization error: %v", err)
+			logger.Error(logger.CategoryAudio, "PortAudio initialization error: %v", err)
 
 			// Check for common ALSA errors
 			errMsg := err.Error()
 			if strings.Contains(errMsg, "ALSA") {
-				log.Println("ALSA error detected. This is usually due to a configuration issue.")
-				log.Println("- Check if ALSA is properly installed")
-				log.Println("- Try running 'aplay -l' to list audio devices")
-				log.Println("- You may need to configure ~/.asoundrc or /etc/asound.conf")
+				logger.Warning(logger.CategoryAudio, "ALSA error detected. This is usually due to a configuration issue.")
+				logger.Info(logger.CategoryAudio, "- Check if ALSA is properly installed")
+				logger.Info(logger.CategoryAudio, "- Try running 'aplay -l' to list audio devices")
+				logger.Info(logger.CategoryAudio, "- You may need to configure ~/.asoundrc or /etc/asound.conf")
 			}
 		}
 		return nil, fmt.Errorf("failed to initialize PortAudio: %w", err)
@@ -77,17 +77,17 @@ func NewRecorder(config Config) (*Recorder, error) {
 	if config.Debug {
 		devices, err := portaudio.Devices()
 		if err != nil {
-			log.Printf("Error getting audio devices: %v", err)
+			logger.Error(logger.CategoryAudio, "Error getting audio devices: %v", err)
 		} else {
-			log.Println("Available audio devices:")
+			logger.Info(logger.CategoryAudio, "Available audio devices:")
 			for i, dev := range devices {
-				log.Printf("[%d] %s (in: %v, out: %v)", i, dev.Name, dev.MaxInputChannels > 0, dev.MaxOutputChannels > 0)
+				logger.Info(logger.CategoryAudio, "[%d] %s (in: %v, out: %v)", i, dev.Name, dev.MaxInputChannels > 0, dev.MaxOutputChannels > 0)
 			}
 		}
 
 		// Print PortAudio version information
 		versionText := portaudio.VersionText()
-		log.Printf("PortAudio version: %s", versionText)
+		logger.Info(logger.CategoryAudio, "PortAudio version: %s", versionText)
 	}
 
 	return recorder, nil
@@ -109,14 +109,14 @@ func (r *Recorder) Start(callback func([]float32)) error {
 	if r.config.Debug {
 		defaultHostApi, err := portaudio.DefaultHostApi()
 		if err == nil {
-			log.Printf("Using audio API: %s", defaultHostApi.Name)
+			logger.Info(logger.CategoryAudio, "Using audio API: %s", defaultHostApi.Name)
 			if defaultHostApi.DefaultInputDevice != nil {
-				log.Printf("Default input device: %s", defaultHostApi.DefaultInputDevice.Name)
+				logger.Info(logger.CategoryAudio, "Default input device: %s", defaultHostApi.DefaultInputDevice.Name)
 			} else {
-				log.Println("Warning: No default input device found")
+				logger.Warning(logger.CategoryAudio, "Warning: No default input device found")
 			}
 		} else {
-			log.Printf("Warning: Could not get default host API: %v", err)
+			logger.Warning(logger.CategoryAudio, "Could not get default host API: %v", err)
 		}
 	}
 
@@ -132,15 +132,15 @@ func (r *Recorder) Start(callback func([]float32)) error {
 
 	if err != nil {
 		if r.config.Debug {
-			log.Printf("Failed to open audio stream: %v", err)
+			logger.Error(logger.CategoryAudio, "Failed to open audio stream: %v", err)
 
 			// Provide guidance for common error cases
 			errMsg := err.Error()
 			if strings.Contains(errMsg, "ALSA") {
-				log.Println("ALSA error detected. Try the following:")
-				log.Println("1. Check audio hardware: 'aplay -l' and 'arecord -l'")
-				log.Println("2. Check for permission issues: 'sudo usermod -a -G audio $USER'")
-				log.Println("3. Create a minimal .asoundrc file in your home directory")
+				logger.Warning(logger.CategoryAudio, "ALSA error detected. Try the following:")
+				logger.Info(logger.CategoryAudio, "1. Check audio hardware: 'aplay -l' and 'arecord -l'")
+				logger.Info(logger.CategoryAudio, "2. Check for permission issues: 'sudo usermod -a -G audio $USER'")
+				logger.Info(logger.CategoryAudio, "3. Create a minimal .asoundrc file in your home directory")
 			}
 		}
 		return fmt.Errorf("failed to open audio stream: %w", err)
@@ -151,7 +151,7 @@ func (r *Recorder) Start(callback func([]float32)) error {
 	if err != nil {
 		r.stream.Close()
 		if r.config.Debug {
-			log.Printf("Failed to start audio stream: %v", err)
+			logger.Error(logger.CategoryAudio, "Failed to start audio stream: %v", err)
 		}
 		return fmt.Errorf("failed to start audio stream: %w", err)
 	}

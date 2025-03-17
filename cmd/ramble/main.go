@@ -4,7 +4,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"os/signal"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/jeff-barlow-spady/ramble/pkg/audio"
 	"github.com/jeff-barlow-spady/ramble/pkg/hotkey"
+	"github.com/jeff-barlow-spady/ramble/pkg/logger"
 	"github.com/jeff-barlow-spady/ramble/pkg/transcription"
 	"github.com/jeff-barlow-spady/ramble/pkg/ui"
 )
@@ -22,19 +22,20 @@ import (
 type Application struct {
 	hotkeyDetector *hotkey.Detector
 	audioRecorder  *audio.Recorder
-	transcriber    *transcription.Transcriber
+	transcriber    transcription.Transcriber
 	ui             *ui.App
 
-	isTestMode  bool
+	isDebugMode bool
 	isListening bool
 	mu          sync.Mutex
 	exitChan    chan struct{}
+	cleanupOnce sync.Once // Ensure cleanup only happens once
 }
 
 // NewApplication creates a new application instance
-func NewApplication(testMode bool) (*Application, error) {
+func NewApplication(debugMode bool) (*Application, error) {
 	// Initialize UI with test mode
-	uiApp := ui.NewWithOptions(testMode)
+	uiApp := ui.NewWithOptions(debugMode)
 
 	// Initialize hotkey detector with default config (Ctrl+Shift+S)
 	hkConfig := hotkey.DefaultConfig()
@@ -42,7 +43,7 @@ func NewApplication(testMode bool) (*Application, error) {
 
 	// Initialize audio recorder with default config and debug mode
 	audioConfig := audio.DefaultConfig()
-	audioConfig.Debug = testMode // Enable debug logs if in test mode
+	audioConfig.Debug = debugMode // Enable debug logs if in debug mode
 
 	// Create the audio recorder
 	var audioRecorder *audio.Recorder
@@ -51,172 +52,149 @@ func NewApplication(testMode bool) (*Application, error) {
 	// Create a proper audio recorder with debug mode
 	audioRecorder, err = audio.NewRecorder(audioConfig)
 	if err != nil {
-		log.Printf("Warning: Audio initialization issue: %v", err)
-		log.Println("You may need to configure your audio system or check permissions")
+		logger.Warning(logger.CategoryAudio, "Audio initialization issue: %v", err)
+		logger.Info(logger.CategoryAudio, "You may need to configure your audio system or check permissions")
 		// We'll continue with a nil recorder and handle it gracefully
 	}
 
 	// Initialize transcriber with default config
 	transConfig := transcription.DefaultConfig()
+	transConfig.Debug = debugMode // Enable debug logs if in debug mode
+
+	// If running in debug mode, use a smaller model for faster loading
+	if debugMode {
+		transConfig.ModelSize = transcription.ModelTiny
+	}
+
+	// Create the transcriber
 	transcriber, err := transcription.NewTranscriber(transConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize transcriber: %w", err)
+		logger.Error(logger.CategoryTranscription, "Failed to initialize transcriber: %v", err)
+		// Continue with a nil transcriber - we'll handle this gracefully
 	}
 
 	app := &Application{
+		ui:             uiApp,
 		hotkeyDetector: hkDetector,
 		audioRecorder:  audioRecorder,
 		transcriber:    transcriber,
-		ui:             uiApp,
-		isTestMode:     testMode,
-		isListening:    false,
+		isDebugMode:    debugMode,
 		exitChan:       make(chan struct{}),
 	}
-
-	// Set up UI callbacks
-	uiApp.SetCallbacks(
-		app.startListening, // On start listening
-		app.stopListening,  // On stop listening
-		nil,                // On clear transcript
-	)
-
-	// Set up preferences callback
-	uiApp.SetPreferencesCallback(app.handlePreferencesChanged)
-
-	// Set up quit callback
-	uiApp.SetQuitCallback(func() {
-		app.Cleanup()
-		close(app.exitChan)
-	})
 
 	return app, nil
 }
 
-// handlePreferencesChanged applies preference changes
-func (a *Application) handlePreferencesChanged(prefs ui.Preferences) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	// Update test mode
-	a.isTestMode = prefs.TestMode
-
-	// Update audio settings
-	if a.audioRecorder != nil {
-		// Create a new config with updated settings
-		audioConfig := audio.Config{
-			SampleRate:      prefs.SampleRate,
-			Channels:        prefs.Channels,
-			FramesPerBuffer: prefs.FramesPerBuffer,
-			Debug:           a.isTestMode, // Enable debug mode if in test mode
-		}
-
-		// If we're currently listening, we need to stop and restart
-		wasListening := a.isListening
-		if wasListening {
-			a.stopListeningInternal()
-		}
-
-		// Recreate the recorder with new settings
-		a.audioRecorder.Terminate()
-
-		// Try to create a real recorder with the new config
-		var err error
-		a.audioRecorder, err = audio.NewRecorder(audioConfig)
-		if err != nil {
-			log.Printf("Error updating audio recorder: %v", err)
-			log.Println("Audio functionality may be limited")
-		}
-
-		// Restart if we were listening
-		if wasListening {
-			a.startListeningInternal()
-		}
-	}
-
-	// Update hotkey if changed
-	currentConfig := a.hotkeyDetector.GetConfig()
-	if !equalStringSlices(currentConfig.Modifiers, prefs.HotkeyModifiers) ||
-		currentConfig.Key != prefs.HotkeyKey {
-
-		// Stop the current detector
-		a.hotkeyDetector.Stop()
-
-		// Create a new config
-		newConfig := hotkey.Config{
-			Modifiers: prefs.HotkeyModifiers,
-			Key:       prefs.HotkeyKey,
-		}
-
-		// Create and start a new detector
-		a.hotkeyDetector = hotkey.NewDetector(newConfig)
-		go func() {
-			err := a.hotkeyDetector.Start(a.toggleListening)
-			if err != nil {
-				log.Printf("Hotkey detector error: %v", err)
-			}
-		}()
-	}
-
-	log.Println("Preferences updated")
-}
-
-// equalStringSlices compares two string slices
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-
-	return true
-}
-
-// Run starts the application
+// Run starts the application event loop
 func (a *Application) Run() error {
-	// Start hotkey detector in a goroutine
-	go func() {
-		err := a.hotkeyDetector.Start(a.toggleListening)
-		if err != nil {
-			log.Printf("Hotkey detector error: %v", err)
+	// Set up UI callbacks
+	a.ui.SetCallbacks(
+		func() { a.startListening() },
+		func() { a.stopListening() },
+		func() { a.ui.UpdateTranscript("") },
+	)
+
+	// Set up quit callback with safe cleanup
+	a.ui.SetQuitCallback(func() {
+		a.SafeCleanup()
+	})
+
+	// Set up preferences callback
+	a.ui.SetPreferencesCallback(func(prefs ui.Preferences) {
+		a.handlePreferencesChanged(prefs)
+	})
+
+	// Start hotkey detection
+	err := a.hotkeyDetector.Start(func() {
+		// Toggle listening state
+		a.mu.Lock()
+		isListening := a.isListening
+		a.mu.Unlock()
+
+		if isListening {
+			a.stopListening()
+		} else {
+			a.startListening()
 		}
-	}()
+	})
+	if err != nil {
+		logger.Warning(logger.CategorySystem, "Failed to start hotkey detection: %v", err)
+	}
 
 	// Set up signal handling for graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Wait for shutdown signal in a separate goroutine
 	go func() {
+		// Wait for either a signal or exitChan
 		select {
-		case <-sigCh:
-			a.Cleanup()
-			os.Exit(0)
+		case <-sigChan:
+			logger.Info(logger.CategoryApp, "Received shutdown signal")
 		case <-a.exitChan:
-			// Normal exit through UI
-			os.Exit(0)
+			logger.Info(logger.CategoryApp, "Application exit requested")
 		}
+
+		// Perform cleanup once
+		a.SafeCleanup()
 	}()
 
-	// Start UI (this blocks until window is closed)
+	// Enter UI main loop (blocks until UI closes)
 	a.ui.Run()
 
 	return nil
 }
 
-// toggleListening switches between listening and idle states
-func (a *Application) toggleListening() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// handlePreferencesChanged handles preference changes
+func (a *Application) handlePreferencesChanged(prefs ui.Preferences) {
+	if a.transcriber != nil {
+		// Convert UI model selection to transcription model size
+		var modelSize transcription.ModelSize
+		switch prefs.ModelSize {
+		case "tiny":
+			modelSize = transcription.ModelTiny
+		case "base":
+			modelSize = transcription.ModelBase
+		case "small":
+			modelSize = transcription.ModelSmall
+		case "medium":
+			modelSize = transcription.ModelMedium
+		case "large":
+			modelSize = transcription.ModelLarge
+		default:
+			modelSize = transcription.ModelSmall
+		}
 
-	if a.isListening {
-		a.stopListeningInternal()
-	} else {
-		a.startListeningInternal()
+		// Update transcriber configuration
+		config := transcription.Config{
+			ModelSize: modelSize,
+			ModelPath: prefs.TranscriptPath, // Use transcript path for models if specified
+			Language:  "",                   // Auto-detect language
+			Debug:     a.isDebugMode,
+		}
+
+		// Update transcriber if possible
+		if updater, ok := a.transcriber.(transcription.ConfigurableTranscriber); ok {
+			err := updater.UpdateConfig(config)
+			if err != nil {
+				logger.Warning(logger.CategoryTranscription,
+					"Failed to update transcriber configuration: %v", err)
+			}
+		}
 	}
+}
+
+// SafeCleanup ensures cleanup is only performed once
+func (a *Application) SafeCleanup() {
+	a.cleanupOnce.Do(func() {
+		// Stop listening if needed
+		a.stopListening()
+
+		// Clean up resources
+		a.Cleanup()
+
+		// Close exit channel
+		close(a.exitChan)
+	})
 }
 
 // startListening begins audio capture and transcription
@@ -224,10 +202,66 @@ func (a *Application) startListening() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.startListeningInternal()
+	if a.isListening {
+		return
+	}
+
+	// If we don't have an audio recorder, show an error and abort
+	if a.audioRecorder == nil {
+		errMsg := "Audio recorder not initialized, cannot start recording"
+		logger.Error(logger.CategoryAudio, "%s", errMsg)
+		a.ui.ShowTemporaryStatus(fmt.Sprintf("Error: %s", errMsg), 3*time.Second)
+
+		// Show a more helpful error dialog
+		a.ui.ShowErrorDialog("Audio Configuration Error",
+			"Could not initialize audio recording.\n\n"+
+				"Possible solutions:\n"+
+				"1. Check if you have a microphone connected\n"+
+				"2. Check audio permissions\n"+
+				"3. Try using the provided asound.conf file:\n"+
+				"   cp asound.conf ~/.asoundrc\n"+
+				"4. Install PulseAudio: sudo apt-get install pulseaudio")
+		return
+	}
+
+	// Start audio recording
+	err := a.audioRecorder.Start(func(audioData []float32) {
+		// Calculate audio level for visualization
+		level := calculateRMSLevel(audioData)
+		a.ui.UpdateAudioLevel(level)
+
+		// Process audio data for transcription
+		if a.transcriber != nil {
+			text, err := a.transcriber.ProcessAudioChunk(audioData)
+			if err != nil {
+				logger.Error(logger.CategoryTranscription, "Transcription error: %v", err)
+				return
+			}
+
+			if text != "" {
+				// Update UI with transcribed text
+				a.ui.AppendTranscript(text)
+			}
+		}
+	})
+
+	if err != nil {
+		logger.Error(logger.CategoryAudio, "Failed to start audio recording: %v", err)
+		a.ui.ShowTemporaryStatus(fmt.Sprintf("Error: %v", err), 3*time.Second)
+
+		// Show a more detailed error dialog
+		a.ui.ShowErrorDialog("Audio Recording Error",
+			fmt.Sprintf("Error starting audio recording: %v\n\n"+
+				"Try running the application with debug mode: ./ramble -debug\n"+
+				"This will provide more detailed logs that may help diagnose the issue.", err))
+		return
+	}
+
+	a.isListening = true
+	a.ui.ShowTemporaryStatus("Started listening (Ctrl+Shift+S to stop)", 2*time.Second)
 }
 
-// calculateRMSLevel calculates the RMS audio level from a buffer of float32 samples
+// calculateRMSLevel calculates audio level for visualization
 func calculateRMSLevel(buffer []float32) float32 {
 	if len(buffer) == 0 {
 		return 0
@@ -253,77 +287,11 @@ func calculateRMSLevel(buffer []float32) float32 {
 	return level
 }
 
-// startListeningInternal is the internal implementation of startListening
-// Caller must hold the mutex
-func (a *Application) startListeningInternal() {
-	if a.isListening {
-		return
-	}
-
-	// If we don't have an audio recorder, show an error and abort
-	if a.audioRecorder == nil {
-		errMsg := "Audio recorder not initialized, cannot start recording"
-		log.Println(errMsg)
-		a.ui.ShowTemporaryStatus(fmt.Sprintf("Error: %s", errMsg), 3*time.Second)
-
-		// Show a more helpful error dialog
-		a.ui.ShowErrorDialog("Audio Configuration Error",
-			"Could not initialize audio recording.\n\n"+
-				"Possible solutions:\n"+
-				"1. Check if you have a microphone connected\n"+
-				"2. Check audio permissions\n"+
-				"3. Try using the provided asound.conf file:\n"+
-				"   cp asound.conf ~/.asoundrc\n"+
-				"4. Install PulseAudio: sudo apt-get install pulseaudio")
-		return
-	}
-
-	// Start audio recording
-	err := a.audioRecorder.Start(func(audioData []float32) {
-		// Calculate audio level for visualization
-		level := calculateRMSLevel(audioData)
-		a.ui.UpdateAudioLevel(level)
-
-		// Process audio data for transcription
-		text, err := a.transcriber.ProcessAudioChunk(audioData)
-		if err != nil {
-			log.Printf("Transcription error: %v", err)
-			return
-		}
-
-		if text != "" {
-			// Update UI with transcribed text
-			a.ui.AppendTranscript(text)
-		}
-	})
-
-	if err != nil {
-		log.Printf("Failed to start audio recording: %v", err)
-		a.ui.ShowTemporaryStatus(fmt.Sprintf("Error: %v", err), 3*time.Second)
-
-		// Show a more detailed error dialog
-		a.ui.ShowErrorDialog("Audio Recording Error",
-			fmt.Sprintf("Error starting audio recording: %v\n\n"+
-				"Try running the application with debug mode: ./ramble -debug\n"+
-				"This will provide more detailed logs that may help diagnose the issue.", err))
-		return
-	}
-
-	a.isListening = true
-	a.ui.ShowTemporaryStatus("Started listening (Ctrl+Shift+S to stop)", 2*time.Second)
-}
-
 // stopListening ends audio capture and transcription
 func (a *Application) stopListening() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.stopListeningInternal()
-}
-
-// stopListeningInternal is the internal implementation of stopListening
-// Caller must hold the mutex
-func (a *Application) stopListeningInternal() {
 	if !a.isListening {
 		return
 	}
@@ -337,7 +305,7 @@ func (a *Application) stopListeningInternal() {
 	// Stop audio recording
 	err := a.audioRecorder.Stop()
 	if err != nil {
-		log.Printf("Failed to stop audio recording: %v", err)
+		logger.Error(logger.CategoryAudio, "Failed to stop audio recording: %v", err)
 	}
 
 	a.isListening = false
@@ -362,22 +330,41 @@ func (a *Application) Cleanup() {
 func main() {
 	// Parse command-line flags
 	debugMode := flag.Bool("debug", false, "Run in debug mode")
+	useTUI := flag.Bool("t", false, "Use text-based UI instead of GUI")
 	flag.Parse()
 
-	// Print startup message
-	fmt.Println("Starting Ramble - Speech-to-Text Application")
+	// Initialize logger
+	logger.Initialize()
 
+	// Configure logger based on debug mode
 	if *debugMode {
-		fmt.Println("Running in debug mode")
+		logger.SetLevel(logger.LevelDebug)
+		logger.Info(logger.CategoryApp, "Debug mode enabled - verbose logging active")
+	} else {
+		// In normal mode, suppress common ALSA warnings
+		logger.SuppressASLAWarnings(true)
+	}
+
+	// Print startup message
+	logger.Info(logger.CategoryApp, "Starting Ramble - Speech-to-Text Application")
+
+	if *useTUI {
+		logger.Info(logger.CategoryUI, "Using terminal-based UI")
+		// Terminal UI support will go here
+		// For now just show a placeholder message
+		fmt.Println("Terminal UI support coming soon!")
+		return
 	}
 
 	app, err := NewApplication(*debugMode)
 	if err != nil {
-		log.Fatalf("Failed to initialize application: %v", err)
+		logger.Error(logger.CategoryApp, "Failed to initialize application: %v", err)
+		os.Exit(1)
 	}
 
 	err = app.Run()
 	if err != nil {
-		log.Fatalf("Application error: %v", err)
+		logger.Error(logger.CategoryApp, "Application error: %v", err)
+		os.Exit(1)
 	}
 }

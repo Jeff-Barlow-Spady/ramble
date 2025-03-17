@@ -31,6 +31,9 @@ type Preferences struct {
 	TranscriptPath  string
 	StartMinimized  bool
 	TestMode        bool
+
+	// Transcription settings
+	ModelSize string
 }
 
 // DefaultPreferences returns the default preferences
@@ -48,6 +51,7 @@ func DefaultPreferences() Preferences {
 		TranscriptPath:  "",
 		StartMinimized:  false,
 		TestMode:        false,
+		ModelSize:       "small",
 	}
 }
 
@@ -107,6 +111,7 @@ func (d *PreferencesDialog) setupUI() {
 		container.NewTabItem("Audio", d.createAudioTab()),
 		container.NewTabItem("Hotkeys", d.createHotkeysTab()),
 		container.NewTabItem("Appearance", d.createAppearanceTab()),
+		container.NewTabItem("Transcription", d.createTranscriptionTab()),
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
 
@@ -360,6 +365,33 @@ func (d *PreferencesDialog) createAppearanceTab() fyne.CanvasObject {
 		widget.NewLabelWithStyle("Appearance Settings", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		container.NewPadded(themeCheck),
 		container.NewPadded(minimizeToTrayCheck),
+	)
+}
+
+// createTranscriptionTab creates the transcription settings tab
+func (d *PreferencesDialog) createTranscriptionTab() fyne.CanvasObject {
+	// Model size selection
+	modelSizeSelect := widget.NewSelect([]string{"tiny", "base", "small", "medium", "large"}, func(selected string) {
+		d.prefs.ModelSize = selected
+	})
+
+	// Set the current value
+	if d.prefs.ModelSize != "" {
+		modelSizeSelect.SetSelected(d.prefs.ModelSize)
+	} else {
+		modelSizeSelect.SetSelected("small") // Default to small
+	}
+
+	// Create the layout
+	return container.NewVBox(
+		widget.NewLabelWithStyle("Transcription Settings", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewGridWithColumns(2,
+			widget.NewLabel("Model Size:"),
+			modelSizeSelect,
+		),
+		widget.NewLabel(""), // Spacer
+		widget.NewLabel("Smaller models are faster but less accurate."),
+		widget.NewLabel("Larger models are more accurate but use more resources."),
 	)
 }
 
