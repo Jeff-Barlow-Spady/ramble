@@ -66,3 +66,14 @@ rice-box.go
 
 # System tray icon cache
 .systray_cache/
+
+# Ignore embedded whisper binaries and models
+pkg/transcription/embed/binaries/*-*/whisper*
+pkg/transcription/embed/models/*.bin
+
+# But keep directory structure
+!pkg/transcription/embed/binaries/
+!pkg/transcription/embed/models/
+!pkg/transcription/embed/binaries/.keep
+!pkg/transcription/embed/models/.keep
+!pkg/transcription/embed/binaries/*-*/

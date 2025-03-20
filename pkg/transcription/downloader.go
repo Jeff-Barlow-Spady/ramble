@@ -27,32 +27,42 @@ var WhisperModelFilenames = map[ModelSize]string{
 
 // DownloadModel downloads a Whisper model if it doesn't exist
 func DownloadModel(modelPath string, modelSize ModelSize) (string, error) {
-	// Get the model filename
-	modelFilename, ok := WhisperModelFilenames[modelSize]
-	if !ok {
-		return "", fmt.Errorf("unknown model size: %s", modelSize)
+	// Check if model already exists
+	if _, err := os.Stat(modelPath); err == nil {
+		// Model already exists, return its path
+		return modelPath, nil
 	}
 
-	// Full path to the model file
-	modelFile := filepath.Join(modelPath, modelFilename)
+	// Determine model filename
+	modelFilename := fmt.Sprintf("ggml-%s.en.bin", modelSize)
 
-	// Check if the model exists
+	// Create directory for model if it doesn't exist
+	modelDir := filepath.Dir(modelPath)
+	if err := os.MkdirAll(modelDir, 0755); err != nil {
+		return "", fmt.Errorf("%w: failed to create model directory %s: %v",
+			ErrModelDownloadFailed, modelDir, err)
+	}
+
+	// Get the model file
+	modelFile := filepath.Join(modelDir, modelFilename)
+
+	// Check if we have to download or if it already exists
 	if _, err := os.Stat(modelFile); os.IsNotExist(err) {
-		logger.Info(logger.CategoryTranscription, "Model file %s not found. Downloading...", modelFile)
+		// Model doesn't exist, download it
+		logger.Info(logger.CategoryTranscription, "Downloading whisper model %s to %s", modelSize, modelFile)
 
-		// Create the model directory if it doesn't exist
-		if err := os.MkdirAll(modelPath, 0755); err != nil {
-			return "", fmt.Errorf("failed to create model directory: %w", err)
+		// Ensure the download directory exists
+		if err := os.MkdirAll(filepath.Dir(modelFile), 0755); err != nil {
+			return "", fmt.Errorf("%w: failed to create download directory: %v",
+				ErrModelDownloadFailed, err)
 		}
 
 		// Download the model
 		if err := downloadModelFile(modelFile, modelFilename); err != nil {
-			return "", fmt.Errorf("failed to download model: %w", err)
+			return "", fmt.Errorf("%w: %v", ErrModelDownloadFailed, err)
 		}
 
-		logger.Info(logger.CategoryTranscription, "Model downloaded successfully: %s", modelFile)
-	} else if err != nil {
-		return "", fmt.Errorf("error checking model file: %w", err)
+		logger.Info(logger.CategoryTranscription, "Download complete: %s", modelFile)
 	} else {
 		logger.Info(logger.CategoryTranscription, "Using existing model file: %s", modelFile)
 	}
@@ -62,61 +72,43 @@ func DownloadModel(modelPath string, modelSize ModelSize) (string, error) {
 
 // downloadModelFile downloads a Whisper model file from HuggingFace
 func downloadModelFile(outputPath, modelFilename string) error {
-	// Create the URL
-	url := WhisperBaseURL + modelFilename
+	// HuggingFace URL for whisper.cpp models
+	baseURL := "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+	modelURL := fmt.Sprintf("%s/%s", baseURL, modelFilename)
 
-	// Get the model size first
-	resp, err := http.Head(url)
+	// Create temporary file
+	tempFile, err := os.CreateTemp(filepath.Dir(outputPath), "model-download-*.bin")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create temporary file: %w", err)
 	}
+	defer os.Remove(tempFile.Name())
 
-	// Check if the response is valid
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download model: HTTP %s", resp.Status)
-	}
-
-	contentLength := resp.ContentLength
-	var totalSize int64
-	if contentLength > 0 {
-		totalSize = contentLength / (1024 * 1024) // Convert to MB
-		logger.Info(logger.CategoryTranscription, "Downloading model (%d MB). This may take a while...", totalSize)
-	} else {
-		logger.Info(logger.CategoryTranscription, "Downloading model. Size unknown. This may take a while...")
-	}
-
-	// Open the URL
-	resp, err = http.Get(url)
+	// Perform HTTP request
+	resp, err := http.Get(modelURL)
 	if err != nil {
-		return err
+		return fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Create the output file
-	out, err := os.Create(outputPath)
-	if err != nil {
-		return err
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%w: HTTP response error: %s", ErrModelDownloadFailed, resp.Status)
 	}
-	defer out.Close()
 
-	// Create a progress tracker
-	downloaded := int64(0)
-	lastReported := int64(0)
-
-	// Create a wrapped reader for progress tracking
-	reader := io.TeeReader(resp.Body, &progressWriter{
-		total:        contentLength,
-		downloaded:   &downloaded,
-		lastReported: &lastReported,
-	})
-
-	// Copy the data
-	_, err = io.Copy(out, reader)
+	// Download with progress
+	_, err = io.Copy(tempFile, resp.Body)
 	if err != nil {
-		// Clean up the partial file on error
-		out.Close()
-		os.Remove(outputPath)
-		return err
+		return fmt.Errorf("%w: download failed: %v", ErrModelDownloadFailed, err)
+	}
+
+	// Close the file
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temporary file: %w", err)
+	}
+
+	// Move the temporary file to the target location
+	if err := os.Rename(tempFile.Name(), outputPath); err != nil {
+		return fmt.Errorf("%w: failed to move downloaded file to final destination: %v",
+			ErrModelDownloadFailed, err)
 	}
 
 	return nil

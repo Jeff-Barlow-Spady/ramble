@@ -1,0 +1,121 @@
+stages:
+  - build
+  - test
+  - release
+
+variables:
+  SMALL_MODEL_URL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+  WHISPER_CPP_VERSION: "v1.5.0"
+
+.setup_dirs: &setup_dirs
+  - mkdir -p pkg/transcription/embed/binaries/${PLATFORM}
+  - mkdir -p pkg/transcription/embed/models
+
+.download_model: &download_model
+  - curl -L -o pkg/transcription/embed/models/small.bin ${SMALL_MODEL_URL}
+
+.download_whisper: &download_whisper
+  - |
+    if [ "${PLATFORM}" = "linux-amd64" ]; then
+      curl -L -o pkg/transcription/embed/binaries/${PLATFORM}/whisper \
+        https://github.com/ggerganov/whisper.cpp/releases/download/${WHISPER_CPP_VERSION}/whisper-linux-x64
+      chmod +x pkg/transcription/embed/binaries/${PLATFORM}/whisper
+    elif [ "${PLATFORM}" = "windows-amd64" ]; then
+      curl -L -o pkg/transcription/embed/binaries/${PLATFORM}/whisper.exe \
+        https://github.com/ggerganov/whisper.cpp/releases/download/${WHISPER_CPP_VERSION}/whisper-win-x64.exe
+    elif [ "${PLATFORM}" = "darwin-amd64" ]; then
+      echo "MacOS binary currently not available, building support only" > pkg/transcription/embed/binaries/${PLATFORM}/whisper
+      chmod +x pkg/transcription/embed/binaries/${PLATFORM}/whisper
+    fi
+
+build:linux:
+  stage: build
+  image: golang:1.21
+  variables:
+    PLATFORM: linux-amd64
+  script:
+    - *setup_dirs
+    - *download_whisper
+    - *download_model
+    - go build -o ramble-${PLATFORM} ./cmd/ramble
+  artifacts:
+    paths:
+      - ramble-${PLATFORM}
+
+build:windows:
+  stage: build
+  image: golang:1.21
+  variables:
+    PLATFORM: windows-amd64
+  script:
+    - *setup_dirs
+    - *download_whisper
+    - *download_model
+    - go build -o ramble-${PLATFORM}.exe ./cmd/ramble
+  artifacts:
+    paths:
+      - ramble-${PLATFORM}.exe
+
+build:macos:
+  stage: build
+  image: golang:1.21
+  variables:
+    PLATFORM: darwin-amd64
+  script:
+    - *setup_dirs
+    - *download_whisper
+    - *download_model
+    - GOOS=darwin GOARCH=amd64 go build -o ramble-${PLATFORM} ./cmd/ramble
+  artifacts:
+    paths:
+      - ramble-${PLATFORM}
+
+test:unit:
+  stage: test
+  image: golang:1.21
+  variables:
+    PLATFORM: linux-amd64
+  script:
+    - *setup_dirs
+    - *download_whisper
+    - *download_model
+    - go test -v ./pkg/transcription/... -short
+    - go test -v ./pkg/audio/... -short
+    - go test -v ./pkg/logger/... -short
+  artifacts:
+    reports:
+      junit: report.xml
+
+test:integration:
+  stage: test
+  image: golang:1.21
+  variables:
+    PLATFORM: linux-amd64
+  script:
+    - *setup_dirs
+    - *download_whisper
+    - *download_model
+    - chmod +x pkg/transcription/embed/binaries/${PLATFORM}/whisper
+    - go test -v ./pkg/transcription/...
+  artifacts:
+    reports:
+      junit: report.xml
+  allow_failure: true  # Integration tests might be flaky due to external binaries
+
+release:
+  stage: release
+  image: golang:1.21
+  script:
+    - echo "Creating release package"
+    - mkdir -p release/linux release/windows release/macos
+    - cp ramble-linux-amd64 release/linux/ramble
+    - cp ramble-windows-amd64.exe release/windows/ramble.exe
+    - cp ramble-darwin-amd64 release/macos/ramble
+    - cp pkg/transcription/embed/models/small.bin release/
+    - cp README.md release/
+  artifacts:
+    paths:
+      - release/
+  only:
+    - tags
+    - main

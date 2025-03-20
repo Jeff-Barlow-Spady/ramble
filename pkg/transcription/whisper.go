@@ -2,15 +2,19 @@
 package transcription
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/jeff-barlow-spady/ramble/pkg/logger"
+	"github.com/jeff-barlow-spady/ramble/pkg/transcription/embed"
 )
 
 // Model size options for Whisper
@@ -38,18 +42,26 @@ type Config struct {
 	ExecutablePath string
 	// Whether to prefer system-installed whisper executables over auto-installation
 	PreferSystemExecutable bool
+	// ExecutableFinder to use for finding or installing the executable
+	Finder ExecutableFinder
 }
 
-// DefaultConfig returns a reasonable default configuration
+// DefaultConfig returns the default configuration for transcription
 func DefaultConfig() Config {
-	return Config{
-		ModelSize:              ModelSmall, // Small is a good balance of accuracy and performance
-		ModelPath:              "",         // Use default location
-		Language:               "",         // Auto-detect language
-		Debug:                  false,
-		ExecutablePath:         "",   // Auto-detect executable
-		PreferSystemExecutable: true, // By default, prefer system-installed executables
+	config := Config{
+		ModelSize:              ModelTiny, // Use tiny model for streaming - fastest response
+		ModelPath:              "",        // Auto-detect or download
+		Language:               "en",      // English
+		Debug:                  false,     // Disable debug logs by default
+		ExecutablePath:         "",        // Auto-detect
+		PreferSystemExecutable: true,      // Prefer system executable by default
 	}
+
+	// Create a finder with this config
+	finder := &DefaultExecutableFinder{config: config}
+	config.Finder = finder
+
+	return config
 }
 
 // Transcriber interface defines methods for speech-to-text conversion
@@ -67,117 +79,263 @@ type ConfigurableTranscriber interface {
 	UpdateConfig(config Config) error
 	// GetModelInfo returns information about the current model
 	GetModelInfo() (ModelSize, string)
+	// SetStreamingCallback sets a callback for receiving streaming results
+	SetStreamingCallback(callback func(text string))
 }
 
-// NewTranscriber creates a new transcription service
-func NewTranscriber(config Config) (Transcriber, error) {
-	// Ensure model path is set
-	if config.ModelPath == "" {
-		config.ModelPath = getModelPath("", config.ModelSize)
+// ExecutableFinder defines an interface for finding whisper executables
+type ExecutableFinder interface {
+	FindExecutable() string
+	InstallExecutable() (string, error)
+}
+
+// DefaultExecutableFinder is the default implementation for finding executables
+type DefaultExecutableFinder struct {
+	config Config
+}
+
+// New creates a new DefaultExecutableFinder with the given config
+func (f *DefaultExecutableFinder) New(config Config) *DefaultExecutableFinder {
+	return &DefaultExecutableFinder{
+		config: config,
 	}
+}
 
-	// Ensure model directory exists
-	if err := os.MkdirAll(config.ModelPath, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create model directory: %w", err)
-	}
-
-	// If a specific executable path is provided, use it directly
-	if config.ExecutablePath != "" {
-		if _, err := os.Stat(config.ExecutablePath); err == nil {
-			logger.Info(logger.CategoryTranscription, "Using specified whisper executable: %s", config.ExecutablePath)
-			return NewExecutableTranscriber(config)
-		}
-		return nil, fmt.Errorf("specified executable not found: %s", config.ExecutablePath)
-	}
-
-	// Try to find executable on the system
-	execPath, err := findWhisperExecutable()
-	systemExecFound := err == nil
-
-	if systemExecFound {
-		// We found a whisper executable
-		execType := detectExecutableType(execPath)
-		logger.Info(logger.CategoryTranscription,
-			"Found system whisper executable: %s (type: %s)", execPath, getExecutableTypeName(execType))
-
-		// If we prefer system executables or auto-install is not supported, use this executable
-		if config.PreferSystemExecutable || !isWhisperInstallSupported() {
-			config.ExecutablePath = execPath
-			return NewExecutableTranscriber(config)
-		}
-
-		// Otherwise, we'll still keep it as a fallback option
-	}
-
-	// If auto-install is not supported or we explicitly prefer system executables,
-	// we should not try to auto-install
-	if !isWhisperInstallSupported() || (config.PreferSystemExecutable && !systemExecFound) {
-		// If we can't find a system executable and can't/shouldn't auto-install,
-		// return a placeholder transcriber
-		logger.Warning(logger.CategoryTranscription,
-			"No Whisper executable found and automatic installation not available or disabled")
-		return &placeholderTranscriber{config: config}, nil
-	}
-
-	// Try to install whisper-cpp
-	logger.Info(logger.CategoryTranscription, "Attempting to auto-install whisper.cpp...")
-	autoExecPath, err := installWhisperExecutable()
+// FindExecutable looks for a whisper executable on the system
+func (f *DefaultExecutableFinder) FindExecutable() string {
+	// Try to find the executable with error handling
+	path, err := f.findWhisperExecutable()
 	if err != nil {
-		logger.Warning(logger.CategoryTranscription,
-			"Failed to auto-install Whisper executable: %v", err)
+		// Log the error for debugging
+		if f.config.Debug {
+			logger.Debug(logger.CategoryTranscription, "Error finding executable: %v", err)
+		}
+		return ""
+	}
+	return path
+}
 
-		// If we found a system executable earlier, use it as fallback
-		if systemExecFound {
-			logger.Info(logger.CategoryTranscription,
-				"Using system whisper executable as fallback: %s", execPath)
-			config.ExecutablePath = execPath
-			return NewExecutableTranscriber(config)
+// findWhisperExecutable is the internal implementation that can return errors
+func (f *DefaultExecutableFinder) findWhisperExecutable() (string, error) {
+	// First, check the explicit path if provided
+	if f.config.ExecutablePath != "" {
+		if stat, err := os.Stat(f.config.ExecutablePath); err == nil && !stat.IsDir() {
+			if err := checkExecutablePermissions(f.config.ExecutablePath); err == nil {
+				return f.config.ExecutablePath, nil
+			}
+		}
+		// If explicit path is provided but invalid, return an error
+		return "", fmt.Errorf("%w: provided executable path does not exist or is not executable: %s",
+			ErrInvalidExecutablePath, f.config.ExecutablePath)
+	}
+
+	// Check the PATH first (system installed executables)
+	executable, err := f.findInPath()
+	if err == nil {
+		logger.Info(logger.CategoryTranscription, "Found whisper executable in PATH: %s", executable)
+		return executable, nil
+	}
+
+	// Check common installation locations
+	executable, err = f.findCommonInstallLocations()
+	if err == nil {
+		logger.Info(logger.CategoryTranscription, "Found whisper executable in common location: %s", executable)
+		return executable, nil
+	}
+
+	// Check package manager locations (Snap, Flatpak, etc.)
+	executable, err = f.findPackageManagerLocations()
+	if err == nil {
+		logger.Info(logger.CategoryTranscription, "Found whisper executable from package manager: %s", executable)
+		return executable, nil
+	}
+
+	// Check user-specific installations
+	executable, err = f.findUserDirectoryInstallations()
+	if err == nil {
+		logger.Info(logger.CategoryTranscription, "Found whisper executable in user directory: %s", executable)
+		return executable, nil
+	}
+
+	// No executable found
+	return "", ErrExecutableNotFound
+}
+
+// Add a helper function to check executable permissions
+func checkExecutablePermissions(path string) error {
+	// Skip permission check on Windows - different permission model
+	if runtime.GOOS == "windows" {
+		// Just check if file exists on Windows
+		_, err := os.Stat(path)
+		return err
+	}
+
+	// Check if file is executable on Unix-like systems
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+
+	// Check if the file is executable by the current user
+	if info.Mode()&0111 == 0 {
+		return fmt.Errorf("file exists but is not executable")
+	}
+
+	return nil
+}
+
+// findInPath checks if the whisper executable is available in the system PATH
+func (f *DefaultExecutableFinder) findInPath() (string, error) {
+	// Common executable names
+	execNames := []string{"whisper", "whisper.cpp", "whisper-cpp", "whisper-gael", "whisper.exe", "whisper-cpp.exe"}
+
+	for _, name := range execNames {
+		path, err := exec.LookPath(name)
+		if err == nil {
+			return path, nil
+		}
+	}
+
+	return "", fmt.Errorf("whisper executable not found in PATH")
+}
+
+// findCommonInstallLocations checks standard system paths for the whisper executable
+func (f *DefaultExecutableFinder) findCommonInstallLocations() (string, error) {
+	var paths []string
+
+	// System-wide binary locations
+	if runtime.GOOS == "windows" {
+		paths = []string{
+			`C:\Program Files\Whisper`,
+			`C:\Program Files (x86)\Whisper`,
+			`C:\Whisper`,
+		}
+	} else {
+		// Unix-like systems (Linux, macOS)
+		paths = []string{
+			"/usr/bin",
+			"/usr/local/bin",
+			"/opt/whisper",
+			"/opt/whisper.cpp",
+			"/opt/local/bin", // MacPorts
+		}
+	}
+
+	return f.findExecutableInPaths(paths)
+}
+
+// findPackageManagerLocations checks package manager locations for the whisper executable
+func (f *DefaultExecutableFinder) findPackageManagerLocations() (string, error) {
+	if runtime.GOOS != "linux" {
+		return "", fmt.Errorf("package manager locations only supported on Linux")
+	}
+
+	// Package manager locations on Linux
+	paths := []string{
+		// Snap
+		"/snap/bin",
+		"/var/lib/snapd/snap/bin",
+
+		// Flatpak
+		"/var/lib/flatpak/exports/bin",
+
+		// PPA and other system package installations
+		"/usr/lib/whisper",
+		"/usr/lib/whisper.cpp",
+		"/usr/lib64/whisper",
+		"/usr/share/whisper/bin",
+
+		// AppImage potential locations
+		"/tmp/.mount_whisper",
+		"/tmp/appimage",
+
+		// Homebrew on Linux
+		"/home/linuxbrew/.linuxbrew/bin",
+	}
+
+	// Add user's .local Flatpak location
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".local/share/flatpak/exports/bin"))
+	}
+
+	return f.findExecutableInPaths(paths)
+}
+
+// findUserDirectoryInstallations checks user-specific installation directories
+func (f *DefaultExecutableFinder) findUserDirectoryInstallations() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("couldn't determine user home directory: %w", err)
+	}
+
+	var paths []string
+
+	if runtime.GOOS == "windows" {
+		paths = []string{
+			filepath.Join(home, "AppData", "Local", "Whisper"),
+			filepath.Join(home, "AppData", "Local", "Programs", "Whisper"),
+			filepath.Join(home, "Whisper"),
+		}
+	} else {
+		// Unix-like systems (Linux, macOS)
+		paths = []string{
+			filepath.Join(home, ".local/bin"),
+			filepath.Join(home, ".whisper"),
+			filepath.Join(home, ".whisper.cpp"),
+			filepath.Join(home, "bin"),
+			filepath.Join(home, "Applications"), // macOS
+
+			// Common user-installed location from GitHub repos
+			filepath.Join(home, "git/whisper.cpp"),
+			filepath.Join(home, "git/whisper"),
+			filepath.Join(home, "github/whisper.cpp"),
+			filepath.Join(home, "github/whisper"),
+
+			// Ramble app locations
+			filepath.Join(home, ".ramble/bin"),
+			filepath.Join(home, ".config/ramble/bin"),
+		}
+	}
+
+	// Add ~/.cargo/bin for Rust-based whisper implementations
+	paths = append(paths, filepath.Join(home, ".cargo/bin"))
+
+	// Add ~/go/bin for Go-based whisper implementations
+	paths = append(paths, filepath.Join(home, "go/bin"))
+
+	return f.findExecutableInPaths(paths)
+}
+
+// findExecutableInPaths checks multiple directories for whisper executables
+func (f *DefaultExecutableFinder) findExecutableInPaths(paths []string) (string, error) {
+	execNames := []string{"whisper", "whisper.cpp", "whisper-cpp", "whisper-gael"}
+
+	// Add platform-specific extensions
+	if runtime.GOOS == "windows" {
+		execNames = append(execNames, "whisper.exe", "whisper-cpp.exe", "whisper-gael.exe")
+	}
+
+	for _, path := range paths {
+		// Skip if path doesn't exist
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			continue
 		}
 
-		return &placeholderTranscriber{config: config}, nil
+		for _, name := range execNames {
+			execPath := filepath.Join(path, name)
+			if _, err := os.Stat(execPath); err == nil {
+				if err := checkExecutablePermissions(execPath); err == nil {
+					return execPath, nil
+				}
+			}
+		}
 	}
 
-	// Set the executable path in the config
-	logger.Info(logger.CategoryTranscription, "Using auto-installed whisper executable: %s", autoExecPath)
-	config.ExecutablePath = autoExecPath
-
-	// Check if the model exists and download if needed
-	modelPath, err := ensureModel(config)
-	if err != nil {
-		logger.Warning(logger.CategoryTranscription,
-			"Failed to download model: %v", err)
-		return &placeholderTranscriber{config: config}, nil
-	}
-
-	// Update config with resolved model path
-	config.ModelPath = modelPath
-
-	// Create a new executable transcriber
-	return NewExecutableTranscriber(config)
+	return "", fmt.Errorf("whisper executable not found in common paths")
 }
 
-// ensureModel checks if model exists and downloads it if needed
-func ensureModel(config Config) (string, error) {
-	modelPath := getModelPath(config.ModelPath, config.ModelSize)
-
-	// Download the model if needed
-	modelFile, err := DownloadModel(modelPath, config.ModelSize)
-	if err != nil {
-		return "", fmt.Errorf("failed to ensure model: %w", err)
-	}
-
-	return modelFile, nil
-}
-
-// isWhisperInstallSupported returns true if this platform supports auto-install
-func isWhisperInstallSupported() bool {
-	// Currently we only support auto-install on limited platforms
-	// This could be expanded in the future
-	return runtime.GOOS == "linux" && runtime.GOARCH == "amd64"
-}
-
-// installWhisperExecutable tries to install the whisper executable
-func installWhisperExecutable() (string, error) {
+// InstallExecutable tries to install the whisper executable
+func (f *DefaultExecutableFinder) InstallExecutable() (string, error) {
 	logger.Info(logger.CategoryTranscription, "Attempting to download and install whisper.cpp executable")
 
 	// Create installation directory
@@ -188,7 +346,7 @@ func installWhisperExecutable() (string, error) {
 
 	installDir := filepath.Join(homeDir, ".local", "share", "ramble", "bin")
 	if err := os.MkdirAll(installDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create installation directory: %w", err)
+		return "", fmt.Errorf("failed to create installation directory: %w", ErrExecutableInstallFailed)
 	}
 
 	// Target executable path
@@ -221,7 +379,80 @@ func installWhisperExecutable() (string, error) {
 	}
 
 	// If we get here, all downloads failed
-	return "", fmt.Errorf("all download attempts failed, last error: %w", dlError)
+	return "", fmt.Errorf("%w: %v", ErrExecutableInstallFailed, dlError)
+}
+
+// NewTranscriber creates a new transcription service
+func NewTranscriber(config Config) (Transcriber, error) {
+	// Ensure we have a finder
+	if config.Finder == nil {
+		config.Finder = &DefaultExecutableFinder{config: config}
+	}
+
+	var execPath string
+	var err error
+
+	// Try to use embedded executable first
+	execPath, err = embed.GetWhisperExecutable()
+	if err == nil {
+		logger.Info(logger.CategoryTranscription, "Using embedded whisper executable")
+		config.ExecutablePath = execPath
+	} else if !errors.Is(err, embed.ErrAssetsNotEmbedded) {
+		// If it's not just missing assets, log a warning
+		logger.Warning(logger.CategoryTranscription,
+			"Failed to extract embedded executable: %v, falling back to system version", err)
+	}
+
+	// If we didn't get an embedded executable, use system version
+	if execPath == "" {
+		execPath, err = ensureExecutablePath(config)
+		if err != nil {
+			logger.Warning(logger.CategoryTranscription,
+				"No whisper executable found: %v", err)
+			return &placeholderTranscriber{config: config}, nil
+		}
+		config.ExecutablePath = execPath
+	}
+
+	// Try to use embedded model
+	modelPath, err := embed.ExtractModel(string(config.ModelSize))
+	if err == nil {
+		logger.Info(logger.CategoryTranscription, "Using embedded model: %s", config.ModelSize)
+		config.ModelPath = modelPath
+	} else {
+		// Fall back to downloaded model
+		logger.Warning(logger.CategoryTranscription,
+			"Embedded model not found: %v, will try to download", err)
+		modelPath, err = ensureModel(config)
+		if err != nil {
+			logger.Warning(logger.CategoryTranscription,
+				"Failed to download model: %v", err)
+			return &placeholderTranscriber{config: config}, nil
+		}
+		config.ModelPath = modelPath
+	}
+
+	return NewExecutableTranscriber(config)
+}
+
+// ensureModel checks if model exists and downloads it if needed
+func ensureModel(config Config) (string, error) {
+	modelPath := getModelPath(config.ModelPath, config.ModelSize)
+
+	// Download the model if needed
+	modelFile, err := DownloadModel(modelPath, config.ModelSize)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrModelDownloadFailed, err)
+	}
+
+	return modelFile, nil
+}
+
+// isWhisperInstallSupported returns true if this platform supports auto-install
+func isWhisperInstallSupported() bool {
+	// Currently we only support auto-install on limited platforms
+	// This could be expanded in the future
+	return runtime.GOOS == "linux" && runtime.GOARCH == "amd64"
 }
 
 // downloadExecutable downloads an executable from a URL and saves it to the specified path
@@ -234,13 +465,13 @@ func downloadExecutable(url string, destPath string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP status error: %s", resp.Status)
+		return fmt.Errorf("%w: HTTP status error: %s", ErrExecutableInstallFailed, resp.Status)
 	}
 
 	// Create output file
 	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY, 0755) // Make it executable
 	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
+		return fmt.Errorf("%w: failed to create output file: %v", ErrExecutableInstallFailed, err)
 	}
 	defer out.Close()
 
@@ -249,7 +480,7 @@ func downloadExecutable(url string, destPath string) error {
 	if err != nil {
 		// Clean up on error
 		os.Remove(destPath)
-		return fmt.Errorf("failed to save executable: %w", err)
+		return fmt.Errorf("%w: failed to save executable: %v", ErrExecutableInstallFailed, err)
 	}
 
 	return nil
@@ -289,6 +520,11 @@ func (t *placeholderTranscriber) GetModelInfo() (ModelSize, string) {
 	return t.config.ModelSize, "placeholder"
 }
 
+// SetStreamingCallback sets a callback for receiving streaming results
+func (t *placeholderTranscriber) SetStreamingCallback(callback func(text string)) {
+	// Placeholder implementation, no streaming callback
+}
+
 // getExecutableTypeName returns a string representation of the executable type
 func getExecutableTypeName(execType ExecutableType) string {
 	switch execType {
@@ -299,4 +535,54 @@ func getExecutableTypeName(execType ExecutableType) string {
 	default:
 		return "unknown"
 	}
+}
+
+func testTranscriber(t Transcriber) error {
+	// Simple smoke test to verify transcriber can execute
+	// Create a minimal audio sample to test
+	testSample := make([]float32, 100)
+
+	// Try to process it with a short timeout
+	done := make(chan error, 1)
+	go func() {
+		_, err := t.ProcessAudioChunk(testSample)
+		done <- err
+	}()
+
+	// Wait for completion or timeout
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(2 * time.Second):
+		return fmt.Errorf("transcriber test timed out")
+	}
+}
+
+// ensureExecutablePath finds or installs a whisper executable
+func ensureExecutablePath(config Config) (string, error) {
+	// If a specific path is provided, use it
+	if config.ExecutablePath != "" {
+		if _, err := os.Stat(config.ExecutablePath); err == nil {
+			return config.ExecutablePath, nil
+		}
+		return "", fmt.Errorf("%w: %s", ErrInvalidExecutablePath, config.ExecutablePath)
+	}
+
+	// Try to find whisper executable on the system
+	execPath := config.Finder.FindExecutable()
+	if execPath != "" {
+		return execPath, nil
+	}
+
+	// If auto-install is supported, try it
+	if isWhisperInstallSupported() {
+		execPath, err := config.Finder.InstallExecutable()
+		if err == nil {
+			return execPath, nil
+		}
+		return "", fmt.Errorf("%w: %v", ErrExecutableInstallFailed, err)
+	}
+
+	return "", fmt.Errorf("%w: %s", ErrPlatformNotSupported,
+		"speech recognition tools not found; please install whisper.cpp or specify the path manually")
 }

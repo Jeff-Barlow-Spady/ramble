@@ -1,0 +1,92 @@
+name: Build Ramble Application
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ created ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux-amd64
+          - os: windows-latest
+            platform: windows-amd64
+          - os: macos-latest
+            platform: darwin-amd64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Create directories for embedding
+      run: |
+        mkdir -p pkg/transcription/embed/binaries/${{ matrix.platform }}
+        mkdir -p pkg/transcription/embed/models
+
+    - name: Download Whisper executable
+      shell: bash
+      run: |
+        if [[ "${{ matrix.platform }}" == "linux-amd64" ]]; then
+          curl -L -o pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper \
+            https://github.com/ggerganov/whisper.cpp/releases/download/v1.5.0/whisper-linux-x64
+          chmod +x pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper
+        elif [[ "${{ matrix.platform }}" == "darwin-amd64" ]]; then
+          # For macOS, might need to build from source if no pre-built binary exists
+          # Placeholder for now
+          echo "Not implemented yet" > pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper
+          chmod +x pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper
+        elif [[ "${{ matrix.platform }}" == "windows-amd64" ]]; then
+          curl -L -o pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper.exe \
+            https://github.com/ggerganov/whisper.cpp/releases/download/v1.5.0/whisper-win-x64.exe
+        fi
+
+    - name: Download Whisper models
+      shell: bash
+      run: |
+        # Download small model by default (adjust as needed)
+        curl -L -o pkg/transcription/embed/models/small.bin \
+          https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+
+    - name: Build application
+      run: go build -o ramble-${{ matrix.platform }} ./cmd/ramble
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ramble-${{ matrix.platform }}
+        path: ramble-${{ matrix.platform }}
+
+    - name: Create release asset
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: ramble-${{ matrix.platform }}
+
+    - name: Validate embedded assets
+      run: |
+        # Check that binaries exist
+        if [ ! -f pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper* ]; then
+          echo "Error: Whisper binary not found for ${{ matrix.platform }}"
+          exit 1
+        fi
+
+        # Check model exists
+        if [ ! -f pkg/transcription/embed/models/small.bin ]; then
+          echo "Error: Model file not found"
+          exit 1
+        fi
+
+        echo "Embedded assets validated successfully"

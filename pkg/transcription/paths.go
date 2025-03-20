@@ -4,55 +4,62 @@ package transcription
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+
+	"github.com/jeff-barlow-spady/ramble/pkg/logger"
 )
 
-// findWhisperExecutable locates the whisper executable
-func findWhisperExecutable() (string, error) {
-	// Check PATH first
-	if path, err := exec.LookPath("whisper"); err == nil {
-		return path, nil
+// getModelPath determines the correct model file path based on configuration
+func getModelPath(modelPathOverride string, modelSize ModelSize) string {
+	// If specific path is provided, use it
+	if modelPathOverride != "" {
+		return modelPathOverride
 	}
 
-	// Check snap location
-	snapPath := "/snap/whisper-cpp/4/bin/main"
-	if _, err := os.Stat(snapPath); err == nil {
-		return snapPath, nil
-	}
-
-	return "", fmt.Errorf("whisper executable not found")
-}
-
-// ensureExecutablePath ensures the executable path is valid
-func ensureExecutablePath(config Config) (string, error) {
-	if config.ExecutablePath != "" {
-		if _, err := os.Stat(config.ExecutablePath); err == nil {
-			return config.ExecutablePath, nil
-		}
-		return "", fmt.Errorf("specified executable not found: %s", config.ExecutablePath)
-	}
-	return findWhisperExecutable()
-}
-
-// getModelPath returns the path for model files
-func getModelPath(configPath string, modelSize ModelSize) string {
-	// If config path is provided and exists, use it
-	if configPath != "" {
-		if _, err := os.Stat(configPath); err == nil {
-			return configPath
-		}
-	}
-
-	// Use standard XDG data directory
+	// Try to find model in standard locations
 	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		path := filepath.Join(homeDir, ".local", "share", "ramble", "models")
-		if err := os.MkdirAll(path, 0755); err == nil {
-			return path
+	if err != nil {
+		logger.Warning(logger.CategoryTranscription, "Failed to get user home directory: %v", err)
+		return "" // Return empty to trigger download
+	}
+
+	// Model file name format varies slightly between implementations
+	possibleNames := []string{
+		fmt.Sprintf("ggml-%s.en.bin", modelSize), // with .en suffix (as downloaded)
+		fmt.Sprintf("ggml-%s.bin", modelSize),    // without .en suffix (as some tools expect)
+		fmt.Sprintf("ggml-%s-q5_0.bin", modelSize),
+		fmt.Sprintf("ggml-%s-q4_0.bin", modelSize),
+	}
+
+	// Check standard model locations
+	modelLocations := []string{
+		// Current directory
+		".",
+		// Models in application directory
+		"models",
+		// User's home directory
+		filepath.Join(homeDir, ".local", "share", "ramble", "models"),
+		filepath.Join(homeDir, ".ramble", "models"), // Also check the old path
+		filepath.Join(homeDir, ".cache", "whisper"),
+		// System-wide locations
+		"/usr/local/share/whisper/models",
+		"/usr/share/whisper/models",
+		// Windows locations
+		filepath.Join("C:\\", "Program Files", "whisper.cpp", "models"),
+	}
+
+	// Check all locations with all possible name formats
+	for _, location := range modelLocations {
+		for _, name := range possibleNames {
+			path := filepath.Join(location, name)
+			if _, err := os.Stat(path); err == nil {
+				logger.Info(logger.CategoryTranscription, "Found existing model at: %s", path)
+				return path
+			}
 		}
 	}
 
-	// Fallback to current directory
-	return "models"
+	// Didn't find existing model, return path where we will download it
+	downloadPath := filepath.Join(homeDir, ".local", "share", "ramble", "models", fmt.Sprintf("ggml-%s.en.bin", modelSize))
+	return downloadPath
 }

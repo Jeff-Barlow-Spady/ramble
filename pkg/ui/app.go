@@ -4,6 +4,7 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -235,11 +236,35 @@ func (a *App) UpdateTranscript(text string) {
 
 // AppendTranscript adds text to the current transcript
 func (a *App) AppendTranscript(text string) {
-	current := a.transcriptBox.Text
-	if current != "" {
-		current += " "
+	if text == "" {
+		return
 	}
-	a.transcriptBox.SetText(current + text)
+
+	current := a.transcriptBox.Text
+	trimmedText := strings.TrimSpace(text)
+
+	// Only append if we have actual text
+	if trimmedText == "" {
+		return
+	}
+
+	// Handle spacing intelligently
+	if current == "" {
+		a.transcriptBox.SetText(trimmedText)
+	} else {
+		// Check if we need to add a space between the current text and the new text
+		lastChar := current[len(current)-1]
+		needsSpace := lastChar != ' ' && lastChar != '\n'
+
+		if needsSpace {
+			a.transcriptBox.SetText(current + " " + trimmedText)
+		} else {
+			a.transcriptBox.SetText(current + trimmedText)
+		}
+	}
+
+	// Scroll to the end of the text
+	a.transcriptBox.CursorRow = len(a.transcriptBox.Text)
 }
 
 // UpdateAudioLevel updates the waveform with current audio level

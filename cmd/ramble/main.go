@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -17,6 +18,9 @@ import (
 	"github.com/jeff-barlow-spady/ramble/pkg/transcription"
 	"github.com/jeff-barlow-spady/ramble/pkg/ui"
 )
+
+// Package-level variable for debounce
+var lastStartTime time.Time
 
 // Application manages the overall application state and components
 type Application struct {
@@ -72,6 +76,23 @@ func NewApplication(debugMode bool) (*Application, error) {
 		// Continue with a nil transcriber - we'll handle this gracefully
 	}
 
+	// Update transcriber configuration
+	config := transcription.Config{
+		ModelSize: transConfig.ModelSize,
+		ModelPath: transConfig.ModelPath,
+		Language:  "", // Auto-detect language
+		Debug:     debugMode,
+	}
+
+	// Update transcriber if possible
+	if updater, ok := transcriber.(transcription.ConfigurableTranscriber); ok {
+		err := updater.UpdateConfig(config)
+		if err != nil {
+			logger.Warning(logger.CategoryTranscription,
+				"Failed to update transcriber configuration: %v", err)
+		}
+	}
+
 	app := &Application{
 		ui:             uiApp,
 		hotkeyDetector: hkDetector,
@@ -79,6 +100,116 @@ func NewApplication(debugMode bool) (*Application, error) {
 		transcriber:    transcriber,
 		isDebugMode:    debugMode,
 		exitChan:       make(chan struct{}),
+	}
+
+	// Set up streaming callback if the transcriber supports it
+	if confTranscriber, ok := transcriber.(transcription.ConfigurableTranscriber); ok {
+		logger.Info(logger.CategoryTranscription, "Setting up improved streaming callback")
+
+		// Keep track of processing state
+		var processingMutex sync.Mutex
+		isProcessing := false
+		processingStartTime := time.Time{}
+		var lastText string
+
+		// Get model info
+		modelSize, _ := confTranscriber.GetModelInfo()
+		logger.Info(logger.CategoryTranscription, "Using model size: %s", modelSize)
+
+		confTranscriber.SetStreamingCallback(func(text string) {
+			// Handle special status messages
+			if text == "Processing audio..." {
+				processingMutex.Lock()
+				isProcessing = true
+				processingStartTime = time.Now()
+				processingMutex.Unlock()
+
+				// Show a more prominent processing indicator
+				ui.RunOnMain(func() {
+					uiApp.ShowTemporaryStatus("Processing speech...", 2*time.Second)
+				})
+				return
+			}
+
+			// Handle completion messages
+			if text == "No speech detected" || text == "Transcription timeout - try again" || text == "Processing complete" {
+				processingMutex.Lock()
+				isProcessing = false
+				processMsec := time.Since(processingStartTime).Milliseconds()
+				processingMutex.Unlock()
+
+				// Log processing time
+				logger.Info(logger.CategoryTranscription, "Processing completed in %d ms with result: %s", processMsec, text)
+
+				// Show a more informative message if no speech was detected
+				ui.RunOnMain(func() {
+					if text == "No speech detected" {
+						// Show user-friendly message for no speech
+						uiApp.ShowTemporaryStatus("No speech detected", 1*time.Second)
+					} else if text == "Processing complete" {
+						// For streaming, just show a subtle indicator that a chunk processed
+						if lastText != "" {
+							uiApp.ShowTemporaryStatus("✓", 500*time.Millisecond)
+						}
+					} else {
+						// Clear any processing status
+						uiApp.ShowTemporaryStatus("", 0)
+					}
+				})
+				return
+			}
+
+			// For normal transcription text, update the UI immediately
+			if text != "" && !strings.HasPrefix(text, "[") && !strings.HasPrefix(text, "(") {
+				logger.Info(logger.CategoryTranscription, "Got streaming text: %s", text)
+
+				// Save the last text
+				lastText = text
+
+				// Update the UI with the transcription in the main thread
+				ui.RunOnMain(func() {
+					uiApp.AppendTranscript(text)
+					// Show a brief success indicator
+					uiApp.ShowTemporaryStatus("✓", 500*time.Millisecond)
+				})
+
+				// Indicate processing is done for now
+				processingMutex.Lock()
+				isProcessing = false
+				processingMutex.Unlock()
+			}
+		})
+
+		// Start a background goroutine to provide periodic updates during processing
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				<-ticker.C
+
+				processingMutex.Lock()
+				if isProcessing {
+					elapsedTime := time.Since(processingStartTime)
+					// Only show processing time if it's taking more than 1.5 seconds
+					if elapsedTime.Seconds() > 1.5 {
+						// Update the UI with the processing time
+						ui.RunOnMain(func() {
+							uiApp.ShowTemporaryStatus(fmt.Sprintf("Processing speech... (%.1f sec)", elapsedTime.Seconds()), 500*time.Millisecond)
+						})
+					}
+				}
+				processingMutex.Unlock()
+
+				// Check if we should exit this goroutine
+				select {
+				case <-app.exitChan:
+					return
+				default:
+					// Continue
+				}
+			}
+		}()
 	}
 
 	return app, nil
@@ -198,66 +329,109 @@ func (a *Application) SafeCleanup() {
 
 // startListening begins audio capture and transcription
 func (a *Application) startListening() {
+	// Use mutex to prevent race conditions
 	a.mu.Lock()
-	defer a.mu.Unlock()
 
+	// Debounce protection - don't start again if we've started recently
+	if !lastStartTime.IsZero() && time.Since(lastStartTime) < 3*time.Second {
+		logger.Warning(logger.CategoryAudio, "Ignoring start request - too soon since last start (%v)", time.Since(lastStartTime))
+		a.mu.Unlock()
+		return
+	}
+
+	// Update timestamp for debounce
+	lastStartTime = time.Now()
+
+	// Check if we're already listening
 	if a.isListening {
+		logger.Warning(logger.CategoryAudio, "Already listening, ignoring start request")
+		a.mu.Unlock()
 		return
 	}
 
-	// If we don't have an audio recorder, show an error and abort
+	// Mark as listening at the start of function to prevent race conditions
+	a.isListening = true
+	a.mu.Unlock()
+
+	// Show a clear status message so users know recording has started
+	a.ui.ShowTemporaryStatus("STREAMING ACTIVE - speak naturally", 3*time.Second)
+
+	// Clear any previous text in the transcription area
+	a.ui.UpdateTranscript("")
+
+	// Log that we're manually starting to listen
+	logger.Info(logger.CategoryAudio, "STREAMING MODE: User initiated recording")
+
+	// Display a startup message in the transcription area to provide immediate feedback
+	a.ui.AppendTranscript("Streaming active... (speak naturally, transcription appears continuously)\n\n")
+
+	// Start audio recorder if needed
 	if a.audioRecorder == nil {
-		errMsg := "Audio recorder not initialized, cannot start recording"
-		logger.Error(logger.CategoryAudio, "%s", errMsg)
-		a.ui.ShowTemporaryStatus(fmt.Sprintf("Error: %s", errMsg), 3*time.Second)
-
-		// Show a more helpful error dialog
-		a.ui.ShowErrorDialog("Audio Configuration Error",
-			"Could not initialize audio recording.\n\n"+
-				"Possible solutions:\n"+
-				"1. Check if you have a microphone connected\n"+
-				"2. Check audio permissions\n"+
-				"3. Try using the provided asound.conf file:\n"+
-				"   cp asound.conf ~/.asoundrc\n"+
-				"4. Install PulseAudio: sudo apt-get install pulseaudio")
-		return
+		var err error
+		a.audioRecorder, err = audio.NewRecorder(audio.DefaultConfig())
+		if err != nil {
+			logger.Error(logger.CategoryAudio, "Failed to create audio recorder: %v", err)
+			a.isListening = false
+			a.ui.ShowTemporaryStatus("Error: Failed to start recording", 3*time.Second)
+			return
+		}
 	}
 
-	// Start audio recording
-	err := a.audioRecorder.Start(func(audioData []float32) {
-		// Calculate audio level for visualization
+	// Set up a safety catch to automatically stop if something goes wrong
+	safetyCleanup := func() {
+		// If we're still listening after 60 seconds, force stop
+		// Extended from 30s to 60s for longer streaming sessions
+		time.AfterFunc(60*time.Second, func() {
+			a.mu.Lock()
+			isStillListening := a.isListening
+			a.mu.Unlock()
+
+			if isStillListening {
+				logger.Warning(logger.CategoryAudio, "SAFETY CHECK: Still listening after 60 seconds, force stopping")
+				a.stopListening()
+				if a.ui != nil {
+					a.ui.ShowTemporaryStatus("Streaming timeout - press Record to start again", 3*time.Second)
+				}
+			}
+		})
+	}
+
+	// Define an audio callback to process the audio data
+	audioCallback := func(audioData []float32) {
+		a.mu.Lock()
+		// Only process if we're still listening
+		if !a.isListening {
+			a.mu.Unlock()
+			return
+		}
+		a.mu.Unlock()
+
+		// Calculate audio level
 		level := calculateRMSLevel(audioData)
 		a.ui.UpdateAudioLevel(level)
 
 		// Process audio data for transcription
-		if a.transcriber != nil {
-			text, err := a.transcriber.ProcessAudioChunk(audioData)
+		// Note: This will not block since we've modified the ProcessAudioChunk method
+		// to handle all processing asynchronously in streaming mode
+		if a.transcriber != nil && level > 0.005 { // Even lower threshold for better streaming sensitivity
+			_, err := a.transcriber.ProcessAudioChunk(audioData)
 			if err != nil {
-				logger.Error(logger.CategoryTranscription, "Transcription error: %v", err)
-				return
-			}
-
-			if text != "" {
-				// Update UI with transcribed text
-				a.ui.AppendTranscript(text)
+				logger.Error(logger.CategoryTranscription, "Error processing audio: %v", err)
 			}
 		}
-	})
+	}
 
+	// Start recording with the callback
+	err := a.audioRecorder.Start(audioCallback)
 	if err != nil {
 		logger.Error(logger.CategoryAudio, "Failed to start audio recording: %v", err)
-		a.ui.ShowTemporaryStatus(fmt.Sprintf("Error: %v", err), 3*time.Second)
-
-		// Show a more detailed error dialog
-		a.ui.ShowErrorDialog("Audio Recording Error",
-			fmt.Sprintf("Error starting audio recording: %v\n\n"+
-				"Try running the application with debug mode: ./ramble -debug\n"+
-				"This will provide more detailed logs that may help diagnose the issue.", err))
+		a.isListening = false
+		a.ui.ShowTemporaryStatus("Error: Failed to start recording", 3*time.Second)
 		return
 	}
 
-	a.isListening = true
-	a.ui.ShowTemporaryStatus("Started listening (Ctrl+Shift+S to stop)", 2*time.Second)
+	// Activate safety cleanup
+	safetyCleanup()
 }
 
 // calculateRMSLevel calculates audio level for visualization
@@ -286,29 +460,45 @@ func calculateRMSLevel(buffer []float32) float32 {
 	return level
 }
 
-// stopListening ends audio capture and transcription
+// stopListening stops audio capture and transcription
 func (a *Application) stopListening() {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if !a.isListening {
-		return
-	}
-
-	// If we don't have an audio recorder, just update UI state
-	if a.audioRecorder == nil {
-		a.isListening = false
-		return
-	}
-
-	// Stop audio recording
-	err := a.audioRecorder.Stop()
-	if err != nil {
-		logger.Error(logger.CategoryAudio, "Failed to stop audio recording: %v", err)
-	}
-
+	// Only do something if we're actually listening
+	wasListening := a.isListening
 	a.isListening = false
-	a.ui.ShowTemporaryStatus("Stopped listening (Ctrl+Shift+S to start)", 2*time.Second)
+	// Reset lastStartTime to allow immediate re-recording
+	lastStartTime = time.Time{}
+	a.mu.Unlock()
+
+	// Skip if we weren't listening
+	if !wasListening {
+		logger.Warning(logger.CategoryAudio, "stopListening called when not listening")
+		return
+	}
+
+	// Log that we're about to stop
+	logger.Info(logger.CategoryAudio, "Stopping audio recording")
+
+	// Show a message that we're stopping - helps provide immediate feedback
+	a.ui.ShowTemporaryStatus("Stopping recording...", 1*time.Second)
+
+	// Stop the audio recorder
+	if a.audioRecorder != nil {
+		err := a.audioRecorder.Stop()
+		if err != nil {
+			logger.Error(logger.CategoryAudio, "Failed to stop audio recording: %v", err)
+		}
+	}
+
+	// Reset UI state with clear feedback
+	if a.ui != nil {
+		// Make sure the UI reflects that we've stopped listening
+		a.ui.ShowTemporaryStatus("Recording stopped", 2*time.Second)
+
+		// Append a note to the transcript to indicate recording has stopped
+		// This helps users understand the state of the application
+		a.ui.AppendTranscript("\n\n(Recording stopped)")
+	}
 }
 
 // Cleanup releases resources
