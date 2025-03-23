@@ -4,6 +4,7 @@ package audio
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 
@@ -210,4 +211,21 @@ func (r *Recorder) processAudio(in, _ []float32) {
 		copy(dataCopy, r.buffer)
 		r.dataCallback(dataCopy)
 	}
+}
+
+// CalculateRMSLevel calculates the Root Mean Square level of audio data
+func CalculateRMSLevel(buffer []float32) float32 {
+	if len(buffer) == 0 {
+		return 0
+	}
+
+	// Calculate sum of squares
+	var sumOfSquares float64
+	for _, sample := range buffer {
+		sumOfSquares += float64(sample * sample)
+	}
+
+	// Calculate RMS
+	meanSquare := sumOfSquares / float64(len(buffer))
+	return float32(math.Sqrt(meanSquare))
 }

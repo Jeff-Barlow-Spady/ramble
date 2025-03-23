@@ -9,7 +9,57 @@ on:
     types: [ created ]
 
 jobs:
+  build-whisper-stream:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-amd64
+          - os: windows-latest
+            platform: windows-amd64
+          - os: macos-latest
+            platform: darwin-amd64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        repository: 'ggerganov/whisper.cpp'
+
+    - name: Build whisper stream for Linux
+      if: matrix.platform == 'linux-amd64'
+      run: |
+        make
+        make stream
+        mkdir -p $GITHUB_WORKSPACE/whisper-binaries/${{ matrix.platform }}
+        cp stream $GITHUB_WORKSPACE/whisper-binaries/${{ matrix.platform }}/whisper
+
+    - name: Build whisper stream for Windows
+      if: matrix.platform == 'windows-amd64'
+      shell: bash
+      run: |
+        make
+        make stream
+        mkdir -p $GITHUB_WORKSPACE/whisper-binaries/${{ matrix.platform }}
+        cp stream.exe $GITHUB_WORKSPACE/whisper-binaries/${{ matrix.platform }}/whisper.exe
+
+    - name: Build whisper stream for macOS
+      if: matrix.platform == 'darwin-amd64'
+      run: |
+        make
+        make stream
+        mkdir -p $GITHUB_WORKSPACE/whisper-binaries/${{ matrix.platform }}
+        cp stream $GITHUB_WORKSPACE/whisper-binaries/${{ matrix.platform }}/whisper
+
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: whisper-stream-${{ matrix.platform }}
+        path: $GITHUB_WORKSPACE/whisper-binaries/${{ matrix.platform }}
+
   build:
+    needs: build-whisper-stream
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -36,22 +86,16 @@ jobs:
         mkdir -p pkg/transcription/embed/binaries/${{ matrix.platform }}
         mkdir -p pkg/transcription/embed/models
 
-    - name: Download Whisper executable
-      shell: bash
+    - name: Download whisper-stream binary
+      uses: actions/download-artifact@v3
+      with:
+        name: whisper-stream-${{ matrix.platform }}
+        path: pkg/transcription/embed/binaries/${{ matrix.platform }}
+
+    - name: Ensure executable permission on Linux and macOS
+      if: matrix.os != 'windows-latest'
       run: |
-        if [[ "${{ matrix.platform }}" == "linux-amd64" ]]; then
-          curl -L -o pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper \
-            https://github.com/ggerganov/whisper.cpp/releases/download/v1.5.0/whisper-linux-x64
-          chmod +x pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper
-        elif [[ "${{ matrix.platform }}" == "darwin-amd64" ]]; then
-          # For macOS, might need to build from source if no pre-built binary exists
-          # Placeholder for now
-          echo "Not implemented yet" > pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper
-          chmod +x pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper
-        elif [[ "${{ matrix.platform }}" == "windows-amd64" ]]; then
-          curl -L -o pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper.exe \
-            https://github.com/ggerganov/whisper.cpp/releases/download/v1.5.0/whisper-win-x64.exe
-        fi
+        chmod +x pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper
 
     - name: Download Whisper models
       shell: bash
@@ -59,6 +103,8 @@ jobs:
         # Download small model by default (adjust as needed)
         curl -L -o pkg/transcription/embed/models/small.bin \
           https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+        curl -L -o pkg/transcription/embed/models/tiny.bin \
+          https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
 
     - name: Build application
       run: go build -o ramble-${{ matrix.platform }} ./cmd/ramble
@@ -76,11 +122,19 @@ jobs:
         files: ramble-${{ matrix.platform }}
 
     - name: Validate embedded assets
+      shell: bash
       run: |
         # Check that binaries exist
-        if [ ! -f pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper* ]; then
-          echo "Error: Whisper binary not found for ${{ matrix.platform }}"
-          exit 1
+        if [[ "${{ matrix.platform }}" == "windows-amd64" ]]; then
+          if [ ! -f pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper.exe ]; then
+            echo "Error: Whisper binary not found for ${{ matrix.platform }}"
+            exit 1
+          fi
+        else
+          if [ ! -f pkg/transcription/embed/binaries/${{ matrix.platform }}/whisper ]; then
+            echo "Error: Whisper binary not found for ${{ matrix.platform }}"
+            exit 1
+          fi
         fi
 
         # Check model exists

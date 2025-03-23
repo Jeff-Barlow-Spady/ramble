@@ -1,10 +1,9 @@
-// Ramble is a cross-platform speech-to-text application
+// Package ramble is a cross-platform speech-to-text application
 package main
 
 import (
 	"flag"
 	"fmt"
-	"math"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/jeff-barlow-spady/ramble/pkg/hotkey"
 	"github.com/jeff-barlow-spady/ramble/pkg/logger"
 	"github.com/jeff-barlow-spady/ramble/pkg/transcription"
+	"github.com/jeff-barlow-spady/ramble/pkg/transcription/embed"
 	"github.com/jeff-barlow-spady/ramble/pkg/ui"
 )
 
@@ -329,72 +329,70 @@ func (a *Application) SafeCleanup() {
 
 // startListening begins audio capture and transcription
 func (a *Application) startListening() {
-	// Use mutex to prevent race conditions
 	a.mu.Lock()
-
-	// Debounce protection - don't start again if we've started recently
-	if !lastStartTime.IsZero() && time.Since(lastStartTime) < 3*time.Second {
-		logger.Warning(logger.CategoryAudio, "Ignoring start request - too soon since last start (%v)", time.Since(lastStartTime))
-		a.mu.Unlock()
-		return
-	}
-
-	// Update timestamp for debounce
-	lastStartTime = time.Now()
-
-	// Check if we're already listening
+	// If already listening, do nothing (debounce)
 	if a.isListening {
-		logger.Warning(logger.CategoryAudio, "Already listening, ignoring start request")
 		a.mu.Unlock()
 		return
 	}
 
-	// Mark as listening at the start of function to prevent race conditions
+	// Implement a cooldown to prevent rapid start/stop
+	// If less than 300ms have passed since the last start, ignore this request
+	now := time.Now()
+	if !lastStartTime.IsZero() && now.Sub(lastStartTime) < 300*time.Millisecond {
+		a.mu.Unlock()
+		return
+	}
+	lastStartTime = now
+
+	// Mark as listening before we start processing
 	a.isListening = true
+
+	// Configure the transcriber for streaming mode if available
+	if a.transcriber != nil {
+		if confTranscriber, ok := a.transcriber.(transcription.ConfigurableTranscriber); ok {
+			// Set recording state to active
+			confTranscriber.SetRecordingState(true)
+		}
+	}
+
 	a.mu.Unlock()
 
-	// Show a clear status message so users know recording has started
-	a.ui.ShowTemporaryStatus("STREAMING ACTIVE - speak naturally", 3*time.Second)
-
-	// Clear any previous text in the transcription area
-	a.ui.UpdateTranscript("")
-
-	// Log that we're manually starting to listen
-	logger.Info(logger.CategoryAudio, "STREAMING MODE: User initiated recording")
-
-	// Display a startup message in the transcription area to provide immediate feedback
-	a.ui.AppendTranscript("Streaming active... (speak naturally, transcription appears continuously)\n\n")
-
-	// Start audio recorder if needed
+	// Ensure we have a valid audio recorder
 	if a.audioRecorder == nil {
+		logger.Info(logger.CategoryAudio, "Initializing audio recorder")
 		var err error
 		a.audioRecorder, err = audio.NewRecorder(audio.DefaultConfig())
 		if err != nil {
 			logger.Error(logger.CategoryAudio, "Failed to create audio recorder: %v", err)
 			a.isListening = false
-			a.ui.ShowTemporaryStatus("Error: Failed to start recording", 3*time.Second)
+			a.ui.ShowTemporaryStatus("Error: Could not initialize audio", 3*time.Second)
 			return
 		}
 	}
 
-	// Set up a safety catch to automatically stop if something goes wrong
+	// If we get this far but fail later, make sure we clean up
 	safetyCleanup := func() {
-		// If we're still listening after 60 seconds, force stop
-		// Extended from 30s to 60s for longer streaming sessions
-		time.AfterFunc(60*time.Second, func() {
-			a.mu.Lock()
-			isStillListening := a.isListening
-			a.mu.Unlock()
+		go func() {
+			// If isListening is still true after 10 minutes, force stop
+			select {
+			case <-time.After(10 * time.Minute):
+				a.mu.Lock()
+				isStillListening := a.isListening
+				a.mu.Unlock()
 
-			if isStillListening {
-				logger.Warning(logger.CategoryAudio, "SAFETY CHECK: Still listening after 60 seconds, force stopping")
-				a.stopListening()
-				if a.ui != nil {
-					a.ui.ShowTemporaryStatus("Streaming timeout - press Record to start again", 3*time.Second)
+				if isStillListening {
+					logger.Warning(logger.CategoryAudio, "Safety timeout triggered after 10 minutes of continuous recording")
+					a.stopListening()
 				}
+			case <-a.exitChan: // Exit if application is shutting down
+				return
 			}
-		})
+		}()
 	}
+
+	// Show a status message
+	a.ui.ShowTemporaryStatus("Recording started", 2*time.Second)
 
 	// Define an audio callback to process the audio data
 	audioCallback := func(audioData []float32) {
@@ -411,12 +409,20 @@ func (a *Application) startListening() {
 		a.ui.UpdateAudioLevel(level)
 
 		// Process audio data for transcription
-		// Note: This will not block since we've modified the ProcessAudioChunk method
-		// to handle all processing asynchronously in streaming mode
-		if a.transcriber != nil && level > 0.005 { // Even lower threshold for better streaming sensitivity
-			_, err := a.transcriber.ProcessAudioChunk(audioData)
-			if err != nil {
-				logger.Error(logger.CategoryTranscription, "Error processing audio: %v", err)
+		if a.transcriber != nil {
+			// Check if the audio level is sufficient to process (avoid processing silence)
+			// Using a more appropriate threshold based on real-world testing
+			if level > 0.01 { // Adjusted threshold for better noise rejection
+				logger.Debug(logger.CategoryAudio, "Processing audio chunk with level: %.4f", level)
+				// Discard the error since we're handling errors in the transcriber itself
+				a.transcriber.ProcessAudioChunk(audioData)
+				// We don't need to log errors here as the transcriber already handles error logging
+				// This eliminates repeated error messages in the logs
+				// The error is already logged in whisper_streaming_transcriber.go
+			} else {
+				// For very low level audio, we just update the UI but don't process
+				// This saves CPU and avoids unnecessary processing of silence
+				logger.Debug(logger.CategoryAudio, "Skipping processing for low-level audio: %.4f", level)
 			}
 		}
 	}
@@ -427,6 +433,13 @@ func (a *Application) startListening() {
 		logger.Error(logger.CategoryAudio, "Failed to start audio recording: %v", err)
 		a.isListening = false
 		a.ui.ShowTemporaryStatus("Error: Failed to start recording", 3*time.Second)
+
+		// Reset recording state if start failed
+		if a.transcriber != nil {
+			if confTranscriber, ok := a.transcriber.(transcription.ConfigurableTranscriber); ok {
+				confTranscriber.SetRecordingState(false)
+			}
+		}
 		return
 	}
 
@@ -436,23 +449,12 @@ func (a *Application) startListening() {
 
 // calculateRMSLevel calculates audio level for visualization
 func calculateRMSLevel(buffer []float32) float32 {
-	if len(buffer) == 0 {
-		return 0
-	}
+	// Use the base RMS calculation
+	level := audio.CalculateRMSLevel(buffer)
 
-	// Calculate sum of squares
-	var sumOfSquares float64
-	for _, sample := range buffer {
-		sumOfSquares += float64(sample * sample)
-	}
-
-	// Calculate RMS
-	meanSquare := sumOfSquares / float64(len(buffer))
-	rms := math.Sqrt(meanSquare)
-
-	// Convert to a 0-1 range with some scaling to make it visually appealing
-	// The 0.1 scaling factor is arbitrary and may need adjustment based on typical audio levels
-	level := float32(rms * 5)
+	// Scale for UI display purposes - this scaling is UI-specific
+	// The scaling factor makes the visualization more sensitive
+	level = level * 5
 	if level > 1.0 {
 		level = 1.0
 	}
@@ -466,6 +468,15 @@ func (a *Application) stopListening() {
 	// Only do something if we're actually listening
 	wasListening := a.isListening
 	a.isListening = false
+
+	// Signal the transcriber that recording has stopped
+	if a.transcriber != nil {
+		if confTranscriber, ok := a.transcriber.(transcription.ConfigurableTranscriber); ok {
+			// Set recording state to inactive to ensure proper cleanup
+			confTranscriber.SetRecordingState(false)
+		}
+	}
+
 	// Reset lastStartTime to allow immediate re-recording
 	lastStartTime = time.Time{}
 	a.mu.Unlock()
@@ -539,9 +550,7 @@ func main() {
 
 	if *useTUI {
 		logger.Info(logger.CategoryUI, "Using terminal-based UI")
-		// Terminal UI support will go here
-		// For now just show a placeholder message
-		fmt.Println("Terminal UI support coming soon!")
+		runTerminalUI(*debugMode)
 		return
 	}
 
@@ -556,4 +565,266 @@ func main() {
 		logger.Error(logger.CategoryApp, "Application error: %v", err)
 		os.Exit(1)
 	}
+}
+
+// runTerminalUI runs the application with a terminal UI
+func runTerminalUI(debugMode bool) {
+	// Set up a buffer for logs instead of writing directly to the console
+	// This will capture logs and allow us to display them in a controlled manner
+	logBuffer := &ui.LogBuffer{}
+
+	// Redirect logger output to our buffer - critical for clean TUI experience
+	logger.SetOutput(logBuffer)
+
+	// Create a terminal UI
+	terminalUI := ui.NewTerminalUI("Ctrl+Shift+S")
+
+	// Connect the log buffer to the terminal UI so logs can be displayed properly
+	logBuffer.SetLogConsumer(terminalUI)
+
+	// Create a terminal-based executable selector for the transcription package
+	termSelector := ui.NewTerminalExecutableSelector()
+
+	// Initialize audio recorder with default config
+	audioConfig := audio.DefaultConfig()
+	audioConfig.Debug = debugMode
+
+	audioRecorder, err := audio.NewRecorder(audioConfig)
+	if err != nil {
+		logger.Warning(logger.CategoryAudio, "Audio initialization issue: %v", err)
+		logger.Info(logger.CategoryAudio, "You may need to configure your audio system or check permissions")
+	}
+
+	// Initialize transcriber with terminal selector
+	transConfig := transcription.DefaultConfig()
+	transConfig.Debug = debugMode
+
+	// Redirect transcription process output to our buffer or /dev/null
+	// This prevents whisper output from interfering with our UI
+	transConfig.RedirectProcessOutput = true
+
+	// Create transcription service with the terminal selector
+	var transcriber transcription.Transcriber
+
+	// Create the transcriber with UI selector
+	transcriber, err = createTranscriberWithSelector(transConfig, termSelector)
+	if err != nil {
+		logger.Error(logger.CategoryTranscription, "Failed to initialize transcriber: %v", err)
+		// Continue with a nil transcriber - we'll handle it gracefully
+		transcriber = nil
+	} else {
+		// Log successful initialization
+		logger.Info(logger.CategoryTranscription, "Transcriber initialized successfully")
+	}
+
+	// Set up streaming callback if the transcriber supports it
+	if confTranscriber, ok := transcriber.(transcription.ConfigurableTranscriber); ok {
+		// Get model info
+		modelSize, modelPath := confTranscriber.GetModelInfo()
+		logger.Info(logger.CategoryTranscription, "Using model size: %s at path: %s", modelSize, modelPath)
+
+		confTranscriber.SetStreamingCallback(func(text string) {
+			if text == "Processing audio..." {
+				terminalUI.AddLog("Processing audio...")
+				return
+			}
+
+			// Handle completion and other status messages
+			if text == "No speech detected" || text == "Transcription timeout - try again" || text == "Processing complete" {
+				terminalUI.AddLog(text)
+				return
+			}
+
+			// For actual transcription text
+			if text != "" && !strings.HasPrefix(text, "[") && !strings.HasPrefix(text, "(") {
+				// Log that we got transcription text
+				logger.Debug(logger.CategoryTranscription, "Transcription text: %s", text)
+				terminalUI.UpdateText(text)
+			}
+		})
+	}
+
+	// Start the terminal UI
+	terminalUI.Start()
+
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Setup recording toggle handler
+	isRecording := false
+	statusChan := terminalUI.GetStatusChannel()
+
+	// Start a goroutine to handle recording state changes and signals
+	go func() {
+		for {
+			select {
+			case <-statusChan:
+				// Toggle recording state
+				if isRecording {
+					// Stop recording
+					if audioRecorder != nil {
+						audioRecorder.Stop()
+					}
+					isRecording = false
+					terminalUI.SetRecordingState(false)
+					terminalUI.AddLog("Recording stopped")
+				} else {
+					// Start recording
+					if audioRecorder != nil {
+						// Define an audio callback to process the audio data
+						audioCallback := func(audioData []float32) {
+							// Calculate audio level
+							level := calculateRMSLevel(audioData)
+							terminalUI.UpdateAudioLevel(level)
+
+							// Process audio data for transcription
+							if transcriber != nil {
+								// Check if the audio level is sufficient to process (avoid processing silence)
+								// Using a more appropriate threshold based on real-world testing
+								if level > 0.01 { // Adjusted threshold for better noise rejection
+									logger.Debug(logger.CategoryAudio, "Processing audio chunk with level: %.4f", level)
+									// Discard the error since we're handling errors in the transcriber itself
+									transcriber.ProcessAudioChunk(audioData)
+									// We don't need to log errors here as the transcriber already handles error logging
+									// This eliminates repeated error messages in the logs
+									// The error is already logged in whisper_streaming_transcriber.go
+								} else {
+									// For very low level audio, we just update the UI but don't process
+									// This saves CPU and avoids unnecessary processing of silence
+									logger.Debug(logger.CategoryAudio, "Skipping processing for low-level audio: %.4f", level)
+								}
+							} else if debugMode && transcriber != nil {
+								// In debug mode, log when audio is below threshold
+								terminalUI.AddLog(fmt.Sprintf("Audio below threshold: %.4f", level))
+
+								// In debug mode, process even when below threshold to help diagnose issues
+								// Discard the error since we're handling errors in the transcriber itself
+								transcriber.ProcessAudioChunk(audioData)
+								// We don't need to log errors here as the transcriber already handles error logging
+							}
+						}
+
+						// Start audio recording with callback
+						err := audioRecorder.Start(audioCallback)
+						if err != nil {
+							logger.Error(logger.CategoryAudio, "Failed to start recording: %v", err)
+							terminalUI.AddLog("Failed to start recording")
+							continue
+						}
+					}
+					isRecording = true
+					terminalUI.SetRecordingState(true)
+					terminalUI.AddLog("Recording started")
+
+					// Clear previous transcription when starting new recording
+					terminalUI.UpdateText("")
+				}
+			case <-sigChan:
+				// Cleanup on signal
+				if audioRecorder != nil {
+					audioRecorder.Stop()
+					audioRecorder.Terminate()
+				}
+				if transcriber != nil {
+					transcriber.Close()
+				}
+				terminalUI.Stop()
+				return
+			}
+		}
+	}()
+
+	// Run the terminal UI (blocks until UI exits)
+	err = terminalUI.RunBlocking()
+	if err != nil {
+		// This error happens after UI exits, so we can print to console directly
+		fmt.Fprintf(os.Stderr, "Terminal UI error: %v\n", err)
+	}
+
+	// Cleanup when UI exits
+	if audioRecorder != nil {
+		audioRecorder.Terminate()
+	}
+	if transcriber != nil {
+		transcriber.Close()
+	}
+
+	// Restore logger output to stderr for any remaining logs after UI closes
+	logger.SetOutput(os.Stderr)
+}
+
+// createTranscriberWithSelector creates a transcriber using the UI selector for executables
+func createTranscriberWithSelector(config transcription.Config, selector ui.ExecutableSelectorUI) (transcription.Transcriber, error) {
+	// Define a simple adapter to connect UI selectors to the transcription package
+	execSelector := &uiSelectorAdapter{selector}
+
+	// Ensure debug settings for improved diagnostics
+	if config.Debug {
+		// Add debug logs for the transcription process
+		logger.Info(logger.CategoryTranscription, "Creating transcriber with debug mode enabled")
+	}
+
+	// Try to use embedded executable if available
+	var execPath string
+	var err error
+
+	// First, try to use embedded executable from the embed package
+	execPath, err = embed.GetWhisperExecutable()
+	if err == nil {
+		logger.Info(logger.CategoryTranscription, "Using embedded whisper executable")
+		config.ExecutablePath = execPath
+	} else {
+		// If embedded executable not available, use system version with UI selector
+		// Get all executables using the finder
+		if config.Finder == nil {
+			config.Finder = transcription.DefaultConfig().Finder
+		}
+
+		// Find all available executables
+		execs := config.Finder.FindAllExecutables()
+
+		// If we have an explicit path, use it
+		if config.ExecutablePath != "" {
+			execPath = config.ExecutablePath
+		} else if len(execs) > 1 {
+			// If we have multiple executables, let the user select
+			selected, err := execSelector.SelectExecutable(execs)
+			if err == nil {
+				config.ExecutablePath = selected
+			} else {
+				// If selection failed, use the first one
+				config.ExecutablePath = execs[0]
+			}
+		} else if len(execs) == 1 {
+			// If we have just one executable, use it
+			config.ExecutablePath = execs[0]
+		} else {
+			// Try to install one if possible
+			execPath, err = config.Finder.InstallExecutable()
+			if err == nil {
+				config.ExecutablePath = execPath
+			}
+		}
+	}
+
+	// Try to use embedded model if available
+	modelPath, err := embed.ExtractModel(string(config.ModelSize))
+	if err == nil {
+		logger.Info(logger.CategoryTranscription, "Using embedded model: %s", config.ModelSize)
+		config.ModelPath = modelPath
+	}
+
+	// Now create the transcriber with the configured executable
+	return transcription.NewTranscriber(config)
+}
+
+// uiSelectorAdapter adapts UI selectors to transcription.ExecutableSelector
+type uiSelectorAdapter struct {
+	uiSelector ui.ExecutableSelectorUI
+}
+
+// SelectExecutable implements the transcription.ExecutableSelector interface
+func (a *uiSelectorAdapter) SelectExecutable(executables []string) (string, error) {
+	return a.uiSelector.SelectExecutable(executables)
 }

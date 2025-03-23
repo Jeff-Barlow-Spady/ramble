@@ -1,6 +1,6 @@
 module github.com/jeff-barlow-spady/ramble
 
-go 1.21
+go 1.23
 
 require (
 	fyne.io/fyne/v2 v2.5.5
@@ -11,6 +11,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/gordonklaus/portaudio v0.0.0-20230709114228-aafa478834f5
 	github.com/robotn/gohook v0.40.0
+	honnef.co/go/tools v0.0.1-2020.1.4
 )
 
 require (
@@ -59,5 +60,6 @@ require (
 	golang.org/x/sync v0.11.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/text v0.16.0 // indirect
+	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
