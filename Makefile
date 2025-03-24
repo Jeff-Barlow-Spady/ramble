@@ -10,7 +10,7 @@ build: check-bindings
 # Build with Go bindings (recommended for better performance)
 build-bindings:
 	./build-go-bindings.sh
-	go build -tags=whisper_go -o ramble ./cmd/ramble
+	CGO_LDFLAGS="-L$(PWD)/whisper.cpp -L$(PWD)/whisper.cpp/build -L$(PWD)/whisper.cpp/build/src -L$(PWD) -L$(HOME)/.ramble/lib" CGO_CFLAGS="-I$(PWD)/whisper.cpp/include -I$(HOME)/.ramble/include" go build -tags=whisper_go -ldflags="-extldflags '-Wl,-rpath,$(PWD) -Wl,-rpath,$(HOME)/.ramble/lib'" -o ramble ./cmd/ramble
 
 # Check if Go bindings are available
 check-bindings:
@@ -39,5 +39,9 @@ test-bindings:
 clean:
 	rm -f ramble
 	@if [ -d "whisper.cpp" ]; then \
-		cd whisper.cpp && make clean; \
+		cd whisper.cpp && (make clean || echo "No clean rule in whisper.cpp, skipping"); \
+		if [ -d "whisper.cpp/build" ]; then \
+			echo "Cleaning whisper.cpp/build directory"; \
+			rm -rf whisper.cpp/build; \
+		fi \
 	fi

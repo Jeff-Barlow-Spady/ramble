@@ -30,7 +30,7 @@ variables:
 
 build:linux:
   stage: build
-  image: golang:1.21
+  image: golang:1.23
   variables:
     PLATFORM: linux-amd64
   script:
@@ -44,7 +44,7 @@ build:linux:
 
 build:windows:
   stage: build
-  image: golang:1.21
+  image: golang:1.23
   variables:
     PLATFORM: windows-amd64
   script:
@@ -58,7 +58,7 @@ build:windows:
 
 build:macos:
   stage: build
-  image: golang:1.21
+  image: golang:1.23
   variables:
     PLATFORM: darwin-amd64
   script:
@@ -72,7 +72,7 @@ build:macos:
 
 test:unit:
   stage: test
-  image: golang:1.21
+  image: golang:1.23
   variables:
     PLATFORM: linux-amd64
   script:

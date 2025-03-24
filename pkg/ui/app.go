@@ -64,6 +64,10 @@ func New() *App {
 // NewWithOptions creates a new UI application with customizable options
 func NewWithOptions(testMode bool) *App {
 	fyneApp := app.New()
+
+	// Apply our custom theme immediately for better visibility of disabled elements
+	fyneApp.Settings().SetTheme(NewRambleTheme(true)) // Default to dark theme
+
 	mainWindow := fyneApp.NewWindow("Ramble - Speech-to-Text")
 
 	// Set window size to match the screenshot
@@ -163,6 +167,10 @@ func (a *App) setupUI() {
 	// Create waveform visualizer
 	waveform := NewWaveformVisualizer(theme.PrimaryColor())
 
+	// Ensure the waveform animation is started immediately
+	waveform.StartListening()
+	waveform.SetAmplitude(0.1) // Set initial amplitude for visibility
+
 	// Create UI components
 	components := CreateUI(
 		a.toggleListenState,
@@ -236,7 +244,11 @@ func (a *App) UpdateTranscript(text string) {
 
 // AppendTranscript adds text to the current transcript
 func (a *App) AppendTranscript(text string) {
+	// Log that we're trying to append text
+	fmt.Printf("UI: AppendTranscript called with text: '%s'\n", text)
+
 	if text == "" {
+		fmt.Println("UI: AppendTranscript - empty text, ignoring")
 		return
 	}
 
@@ -245,32 +257,94 @@ func (a *App) AppendTranscript(text string) {
 
 	// Only append if we have actual text
 	if trimmedText == "" {
+		fmt.Println("UI: AppendTranscript - text is only whitespace, ignoring")
 		return
 	}
 
-	// Handle spacing intelligently
-	if current == "" {
-		a.transcriptBox.SetText(trimmedText)
-	} else {
-		// Check if we need to add a space between the current text and the new text
-		lastChar := current[len(current)-1]
-		needsSpace := lastChar != ' ' && lastChar != '\n'
+	// Check for "Recording stopped" message
+	isRecordingStopped := strings.Contains(trimmedText, "(Recording stopped)")
 
-		if needsSpace {
-			a.transcriptBox.SetText(current + " " + trimmedText)
+	// Check if the current text already has a recording stopped message
+	hasRecordingStopped := strings.Contains(current, "(Recording stopped)")
+
+	// Check if the current text is just the initial placeholder
+	initialText := "Ready for transcription. Press Record to start."
+
+	// Handle the different cases
+	if current == initialText {
+		// Replace the initial text with the first transcription
+		fmt.Printf("UI: AppendTranscript - replacing initial text with: '%s'\n", trimmedText)
+		a.transcriptBox.SetText(trimmedText)
+	} else if isRecordingStopped && hasRecordingStopped {
+		// If we already have a recording stopped message, we should not append another one
+		fmt.Println("UI: AppendTranscript - already has recording stopped message, not appending")
+		// Instead, we could clear the transcript or prepare for new recording
+		// But for now, we'll just keep the current transcript
+	} else if current == "(Recording stopped)" && isRecordingStopped {
+		// Don't duplicate the message
+		fmt.Println("UI: AppendTranscript - avoiding duplicate recording stopped message")
+	} else {
+		// Handle spacing intelligently
+		if current == "" {
+			fmt.Printf("UI: AppendTranscript - setting first text: '%s'\n", trimmedText)
+			a.transcriptBox.SetText(trimmedText)
 		} else {
-			a.transcriptBox.SetText(current + trimmedText)
+			// Check if text ends with a sentence-ending character to determine formatting
+			endsWithSentence := false
+			if len(current) > 0 {
+				lastChar := current[len(current)-1]
+				endsWithSentence = lastChar == '.' || lastChar == '?' || lastChar == '!' || lastChar == '\n'
+			}
+
+			// Check if the new text appears to start a new paragraph (capitalized first letter)
+			startsNewParagraph := false
+			if len(trimmedText) > 0 {
+				firstChar := trimmedText[0]
+				startsNewParagraph = (firstChar >= 'A' && firstChar <= 'Z') && endsWithSentence
+			}
+
+			// Apply appropriate formatting
+			if startsNewParagraph {
+				// Add a newline for new paragraphs
+				newText := current + "\n\n" + trimmedText
+				fmt.Printf("UI: AppendTranscript - appending as new paragraph: '%s'\n", newText)
+				a.transcriptBox.SetText(newText)
+			} else if endsWithSentence {
+				// Add a space after sentences
+				newText := current + " " + trimmedText
+				fmt.Printf("UI: AppendTranscript - appending after sentence: '%s'\n", newText)
+				a.transcriptBox.SetText(newText)
+			} else {
+				// Check if we need to add a space between the current text and the new text
+				lastChar := current[len(current)-1]
+				needsSpace := lastChar != ' ' && lastChar != '\n'
+
+				if needsSpace {
+					newText := current + " " + trimmedText
+					fmt.Printf("UI: AppendTranscript - appending with space: '%s'\n", newText)
+					a.transcriptBox.SetText(newText)
+				} else {
+					newText := current + trimmedText
+					fmt.Printf("UI: AppendTranscript - appending without space: '%s'\n", newText)
+					a.transcriptBox.SetText(newText)
+				}
+			}
 		}
 	}
 
 	// Scroll to the end of the text
 	a.transcriptBox.CursorRow = len(a.transcriptBox.Text)
+	fmt.Println("UI: AppendTranscript - done updating text")
 }
 
 // UpdateAudioLevel updates the waveform with current audio level
 func (a *App) UpdateAudioLevel(level float32) {
 	if a.state == StateListening || a.state == StateTranscribing {
 		a.waveform.SetAmplitude(level)
+	} else {
+		// In non-recording states, keep the waveform visible with minimal animation
+		// This ensures the UI component remains responsive and visible to the user
+		a.waveform.SetAmplitude(0.05) // Small idle animation
 	}
 }
 
@@ -370,7 +444,9 @@ func (a *App) copyTranscript() {
 
 // clearTranscript clears the transcript text
 func (a *App) clearTranscript() {
-	a.transcriptBox.SetText("")
+	// Set text back to initial prompt
+	a.transcriptBox.SetText("Ready for transcription. Press Record to start.")
+
 	if a.onClearTranscript != nil {
 		a.onClearTranscript()
 	}

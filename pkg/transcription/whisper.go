@@ -480,57 +480,21 @@ func (f *DefaultExecutableFinder) InstallExecutable() (string, error) {
 
 // NewTranscriber creates a new transcriber for speech-to-text
 func NewTranscriber(config Config) (ConfigurableTranscriber, error) {
-	// First try the Go bindings implementation which is the most efficient
+	// Always try to use Go bindings and don't fall back to the executable approach
 	goBindingErr := checkGoBindingsAvailable()
 	if goBindingErr == nil {
 		logger.Info(logger.CategoryTranscription, "Using Go bindings for whisper.cpp")
 		return NewGoBindingTranscriber(config)
 	}
 
-	logger.Warning(logger.CategoryTranscription,
-		"Go bindings for whisper.cpp not available (this is the recommended method): %v", goBindingErr)
-
-	// Second, try CGO implementation if available
-	hasCGO := haveCGOSupport()
-	if hasCGO {
-		logger.Info(logger.CategoryTranscription, "Using high-performance CGO transcriber")
-		return newCGOTranscriberIfAvailable(config)
-	}
-
-	// If neither Go bindings nor CGO are available, fall back to executable-based transcriber
-	// Find an executable if not already specified
-	execPath, err := ensureExecutablePath(config, nil)
-	if err != nil {
-		logger.Warning(logger.CategoryTranscription,
-			"Could not find whisper executable: %v. Will proceed with limited functionality.", err)
-	}
-	config.ExecutablePath = execPath
-
-	// Ensure we have a model
-	modelPath, err := ensureModel(config)
-	if err != nil {
-		logger.Warning(logger.CategoryTranscription,
-			"Could not find suitable model: %v. Will proceed with limited functionality.", err)
-	}
-	config.ModelPath = modelPath
-
-	// Try to look for a stream-capable executable first
-	streamExec, streamErr := findStreamExecutable()
-	if streamErr == nil {
-		logger.Info(logger.CategoryTranscription,
-			"Found stream-capable whisper executable at %s", streamExec)
-		config.ExecutablePath = streamExec
-	}
-
-	// Create the executable-based transcriber
-	return NewExecutableTranscriber(config)
+	// If Go bindings are not available, return a clear error explaining what's needed
+	return nil, fmt.Errorf("Go bindings for whisper.cpp are required but not available: %v\n"+
+		"Please run ./build-go-bindings.sh to set up Go bindings", goBindingErr)
 }
 
 // checkGoBindingsAvailable checks if the Go bindings for whisper.cpp are available
 func checkGoBindingsAvailable() error {
-	// This is a basic check to see if the whisper.cpp Go bindings are available
-	// The actual import is handled in whisper_go_binding.go
-	// If the import fails, the compiler will generate an error and this code won't run
+	// This function checks if the whisper.cpp Go bindings are properly set up
 
 	// Check if we can access the whisper.cpp repository
 	_, err := os.Stat("whisper.cpp")
@@ -538,12 +502,53 @@ func checkGoBindingsAvailable() error {
 		return fmt.Errorf("whisper.cpp repository not found: %w", err)
 	}
 
-	// Check for Go bindings
+	// Check for Go bindings directory
 	_, err = os.Stat("whisper.cpp/bindings/go")
 	if err != nil {
 		return fmt.Errorf("whisper.cpp Go bindings not found: %w", err)
 	}
 
+	// Check for Go bindings code
+	_, err = os.Stat("whisper.cpp/bindings/go/pkg/whisper/model.go")
+	if err != nil {
+		return fmt.Errorf("whisper.cpp Go bindings package not found: %w", err)
+	}
+
+	// Check that the whisper.h header exists (required for CGO)
+	_, err = os.Stat("whisper.cpp/include/whisper.h")
+	if err != nil {
+		return fmt.Errorf("whisper.cpp header files not found: %w", err)
+	}
+
+	// Check that the library has been built
+	libraryFound := false
+	libraryPaths := []string{
+		// Standard locations
+		"whisper.cpp/build/libwhisper.so",
+		"whisper.cpp/build/libwhisper.a",
+		"whisper.cpp/build/libwhisper.dylib",
+		// CMake build locations
+		"whisper.cpp/build/src/libwhisper.so",
+		"whisper.cpp/build/src/libwhisper.a",
+		"whisper.cpp/build/src/libwhisper.dylib",
+		// Symlink created by build-go-bindings.sh
+		"whisper.cpp/libwhisper.a",
+		"whisper.cpp/libwhisper.so",
+		"whisper.cpp/libwhisper.dylib",
+	}
+
+	for _, path := range libraryPaths {
+		if _, err := os.Stat(path); err == nil {
+			libraryFound = true
+			break
+		}
+	}
+
+	if !libraryFound {
+		return fmt.Errorf("whisper.cpp library not built - run build-go-bindings.sh")
+	}
+
+	// All checks passed - Go bindings are available
 	return nil
 }
 
@@ -641,22 +646,6 @@ func (t *placeholderTranscriber) SetStreamingCallback(callback func(text string)
 // This helps optimize resource usage and ensure proper cleanup when recording stops
 func (t *placeholderTranscriber) SetRecordingState(isRecording bool) {
 	// Placeholder implementation, no recording state management
-}
-
-// getExecutableTypeName returns a string representation of the executable type
-func getExecutableTypeName(execType ExecutableType) string {
-	switch execType {
-	case ExecutableTypeWhisperCpp:
-		return "whisper.cpp"
-	case ExecutableTypeWhisperGael:
-		return "whisper-gael (Python)"
-	case ExecutableTypeWhisperPython:
-		return "whisper (Python)"
-	case ExecutableTypeWhisperCppStream:
-		return "whisper.cpp stream"
-	default:
-		return "unknown"
-	}
 }
 
 func testTranscriber(t Transcriber) error {

@@ -84,14 +84,49 @@ func TestWhisperStreamExecutable(t *testing.T) {
 	}()
 
 	// Send test audio data to stdin
-	audioData, err := os.ReadFile(audioPath)
-	if err != nil {
-		t.Fatalf("Failed to read test audio file: %v", err)
+	var audioReader io.Reader
+	if soxPath, err := exec.LookPath("sox"); err == nil {
+		// sox is available, spawn sox to generate 3 seconds of raw PCM audio
+		t.Logf("sox found at %s, using real-time audio streaming from sox", soxPath)
+		soxCmd := exec.Command(soxPath, "-n", "-r", "16000", "-c", "1", "-b", "16", "-e", "signed-integer", "-t", "raw", "-", "trim", "0.0", "3.0")
+		soxPipe, err := soxCmd.StdoutPipe()
+		if err != nil {
+			t.Fatalf("Failed to get sox stdout pipe: %v", err)
+		}
+		if err := soxCmd.Start(); err != nil {
+			t.Fatalf("Failed to start sox command: %v", err)
+		}
+		audioReader = soxPipe
+	} else {
+		// sox not available, fall back to file-based test audio
+		audioPath, err := createTestAudioFile()
+		if err != nil {
+			t.Fatalf("Failed to create test audio file: %v", err)
+		}
+		t.Logf("sox not found; falling back to test audio file: %s", audioPath)
+		data, err := os.ReadFile(audioPath)
+		if err != nil {
+			t.Fatalf("Failed to read test audio file: %v", err)
+		}
+		audioReader = strings.NewReader(string(data))
 	}
 
-	// Write the data to stdin
-	if _, err := stdin.Write(audioData); err != nil {
-		t.Fatalf("Failed to write to stdin: %v", err)
+	// Read from audioReader in chunks and write to stdin
+	buf := make([]byte, 3200) // approx 0.2 seconds of audio
+	for {
+		n, err := audioReader.Read(buf)
+		if n > 0 {
+			if _, err := stdin.Write(buf[:n]); err != nil {
+				t.Fatalf("Failed to write chunk to stdin: %v", err)
+			}
+			// Simulate real-time delay
+			time.Sleep(200 * time.Millisecond)
+		}
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatalf("Error reading audio data: %v", err)
+		}
 	}
 
 	// Close stdin to signal end of input

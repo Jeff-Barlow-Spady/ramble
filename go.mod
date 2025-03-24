@@ -9,10 +9,13 @@ require (
 	github.com/charmbracelet/bubbles v0.20.0
 	github.com/charmbracelet/bubbletea v1.3.4
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/ggerganov/whisper.cpp/bindings/go v0.0.0
 	github.com/gordonklaus/portaudio v0.0.0-20230709114228-aafa478834f5
 	github.com/robotn/gohook v0.40.0
-	honnef.co/go/tools v0.0.1-2020.1.4
 )
+
+// Replace directive to use local whisper.cpp bindings
+replace github.com/ggerganov/whisper.cpp/bindings/go => ./whisper.cpp/bindings/go
 
 require (
 	github.com/BurntSushi/toml v1.4.0 // indirect
@@ -50,7 +53,7 @@ require (
 	github.com/rymdport/portal v0.3.0 // indirect
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
-	github.com/stretchr/testify v1.8.4 // indirect
+	github.com/stretchr/testify v1.9.0 // indirect
 	github.com/vcaesar/keycode v0.10.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.7.1 // indirect
@@ -60,6 +63,5 @@ require (
 	golang.org/x/sync v0.11.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/text v0.16.0 // indirect
-	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

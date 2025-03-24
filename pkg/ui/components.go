@@ -24,12 +24,31 @@ type UIComponents struct {
 
 // createTranscriptArea creates the main transcript text area
 func createTranscriptArea() *widget.Entry {
+	// Create a multiline entry that is properly configured for transcription display
 	transcript := widget.NewMultiLineEntry()
-	transcript.Wrapping = fyne.TextWrapWord
-	transcript.SetPlaceHolder("Transcribed text will appear here...")
 
-	// Make it read-only by disabling it in Fyne
-	transcript.Disable()
+	// Set proper wrapping
+	transcript.Wrapping = fyne.TextWrapWord
+
+	// Use clear placeholder text with high contrast
+	transcript.SetPlaceHolder("Transcribed text will appear here (waiting for speech)...")
+
+	// Use styling for better visibility - bold is set in the TextStyle struct
+	transcript.TextStyle = fyne.TextStyle{
+		Bold: true, // Make text bold for better visibility
+	}
+
+	// Make the text larger for better readability
+	// Note: The actual text size comes from the theme, but we're using a custom theme
+	// with larger text size in theme.go (1.2x normal size)
+
+	// Set initial text to make sure it's working
+	transcript.SetText("Ready for transcription. Press Record to start.")
+
+	// Set read-only to false to allow text selection and copying
+	// This improves usability while still preventing user editing
+	transcript.DisableableWidget.Disable()
+	transcript.Wrapping = fyne.TextWrapWord
 
 	return transcript
 }
@@ -124,9 +143,14 @@ func createMainUI(
 	// Create a scroll container for the transcript
 	transcriptScroll := container.NewVScroll(transcriptBox)
 
-	// Make the transcript area with a reasonable height
+	// Make the transcript area with a reasonable height and better visibility
+	// Use a colored border to make it more prominent
+	transcriptBorder := canvas.NewRectangle(theme.PrimaryColor())
+	transcriptBackground := canvas.NewRectangle(color.NRGBA{R: 30, G: 30, B: 35, A: 255})
+
 	transcriptContainer := container.NewStack(
-		canvas.NewRectangle(theme.BackgroundColor()),
+		transcriptBorder,
+		container.NewPadded(transcriptBackground),
 		container.NewPadded(transcriptScroll),
 	)
 
@@ -141,12 +165,12 @@ func createMainUI(
 		// Control panel in the middle
 		container.NewPadded(controlPanel),
 
-		// Transcript at the bottom
+		// Transcript at the bottom - make it larger by giving it more weight
 		container.NewPadded(transcriptContainer),
 	)
 
-	// Set height constraints to make the transcript larger
-	transcriptContainer.Resize(fyne.NewSize(900, 300))
+	// Set height constraints to make the transcript larger - more space for text
+	transcriptContainer.Resize(fyne.NewSize(900, 365))
 
 	return mainContent
 }

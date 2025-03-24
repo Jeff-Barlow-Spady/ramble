@@ -34,6 +34,9 @@ type Application struct {
 	mu          sync.Mutex
 	exitChan    chan struct{}
 	cleanupOnce sync.Once // Ensure cleanup only happens once
+
+	// Track last audio level for inactivity detection
+	lastAudioLevel float32
 }
 
 // NewApplication creates a new application instance
@@ -100,6 +103,7 @@ func NewApplication(debugMode bool) (*Application, error) {
 		transcriber:    transcriber,
 		isDebugMode:    debugMode,
 		exitChan:       make(chan struct{}),
+		lastAudioLevel: 0,
 	}
 
 	// Set up streaming callback if the transcriber supports it
@@ -110,73 +114,30 @@ func NewApplication(debugMode bool) (*Application, error) {
 		var processingMutex sync.Mutex
 		isProcessing := false
 		processingStartTime := time.Time{}
-		var lastText string
 
 		// Get model info
 		modelSize, _ := confTranscriber.GetModelInfo()
 		logger.Info(logger.CategoryTranscription, "Using model size: %s", modelSize)
 
 		confTranscriber.SetStreamingCallback(func(text string) {
-			// Handle special status messages
-			if text == "Processing audio..." {
-				processingMutex.Lock()
-				isProcessing = true
-				processingStartTime = time.Now()
-				processingMutex.Unlock()
+			logger.Info(logger.CategoryTranscription, "Got streaming text: %s", text)
 
-				// Show a more prominent processing indicator
-				ui.RunOnMain(func() {
-					uiApp.ShowTemporaryStatus("Processing speech...", 2*time.Second)
-				})
-				return
+			// Don't ignore or filter out actual transcription text
+			// Only skip special tokens in brackets that aren't actual speech
+			if strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]") {
+				// Special token - skip tokens like [BLANK_AUDIO] but keep meaningful ones
+				if text == "[BLANK_AUDIO]" {
+					logger.Info(logger.CategoryTranscription, "Skipping special token: %s", text)
+					return
+				}
 			}
 
-			// Handle completion messages
-			if text == "No speech detected" || text == "Transcription timeout - try again" || text == "Processing complete" {
-				processingMutex.Lock()
-				isProcessing = false
-				processMsec := time.Since(processingStartTime).Milliseconds()
-				processingMutex.Unlock()
-
-				// Log processing time
-				logger.Info(logger.CategoryTranscription, "Processing completed in %d ms with result: %s", processMsec, text)
-
-				// Show a more informative message if no speech was detected
+			// Process valid transcription text
+			logger.Info(logger.CategoryTranscription, "Updating transcript with: %s", text)
+			if app.ui != nil {
 				ui.RunOnMain(func() {
-					if text == "No speech detected" {
-						// Show user-friendly message for no speech
-						uiApp.ShowTemporaryStatus("No speech detected", 1*time.Second)
-					} else if text == "Processing complete" {
-						// For streaming, just show a subtle indicator that a chunk processed
-						if lastText != "" {
-							uiApp.ShowTemporaryStatus("✓", 500*time.Millisecond)
-						}
-					} else {
-						// Clear any processing status
-						uiApp.ShowTemporaryStatus("", 0)
-					}
+					app.ui.AppendTranscript(text)
 				})
-				return
-			}
-
-			// For normal transcription text, update the UI immediately
-			if text != "" && !strings.HasPrefix(text, "[") && !strings.HasPrefix(text, "(") {
-				logger.Info(logger.CategoryTranscription, "Got streaming text: %s", text)
-
-				// Save the last text
-				lastText = text
-
-				// Update the UI with the transcription in the main thread
-				ui.RunOnMain(func() {
-					uiApp.AppendTranscript(text)
-					// Show a brief success indicator
-					uiApp.ShowTemporaryStatus("✓", 500*time.Millisecond)
-				})
-
-				// Indicate processing is done for now
-				processingMutex.Lock()
-				isProcessing = false
-				processingMutex.Unlock()
 			}
 		})
 
@@ -333,26 +294,30 @@ func (a *Application) startListening() {
 	// If already listening, do nothing (debounce)
 	if a.isListening {
 		a.mu.Unlock()
+		logger.Info(logger.CategoryAudio, "Already listening, ignoring start request")
 		return
 	}
 
 	// Implement a cooldown to prevent rapid start/stop
-	// If less than 300ms have passed since the last start, ignore this request
+	// If less than 500ms have passed since the last start, ignore this request
 	now := time.Now()
-	if !lastStartTime.IsZero() && now.Sub(lastStartTime) < 300*time.Millisecond {
+	if !lastStartTime.IsZero() && now.Sub(lastStartTime) < 500*time.Millisecond {
 		a.mu.Unlock()
+		logger.Info(logger.CategoryAudio, "Ignoring start request due to cooldown period")
 		return
 	}
 	lastStartTime = now
 
 	// Mark as listening before we start processing
 	a.isListening = true
+	logger.Info(logger.CategoryAudio, "Starting listening")
 
 	// Configure the transcriber for streaming mode if available
 	if a.transcriber != nil {
 		if confTranscriber, ok := a.transcriber.(transcription.ConfigurableTranscriber); ok {
 			// Set recording state to active
 			confTranscriber.SetRecordingState(true)
+			logger.Info(logger.CategoryTranscription, "Transcriber recording state set to active")
 		}
 	}
 
@@ -373,28 +338,15 @@ func (a *Application) startListening() {
 
 	// If we get this far but fail later, make sure we clean up
 	safetyCleanup := func() {
+		// If we panic or exit abruptly, make sure resources are cleaned up
 		go func() {
-			// If isListening is still true after 10 minutes, force stop
-			select {
-			case <-time.After(10 * time.Minute):
-				a.mu.Lock()
-				isStillListening := a.isListening
-				a.mu.Unlock()
-
-				if isStillListening {
-					logger.Warning(logger.CategoryAudio, "Safety timeout triggered after 10 minutes of continuous recording")
-					a.stopListening()
-				}
-			case <-a.exitChan: // Exit if application is shutting down
-				return
-			}
+			// Wait up to 5 minutes (should never happen in normal usage)
+			time.Sleep(5 * time.Minute)
+			// Force cleanup
+			a.stopListening()
 		}()
 	}
 
-	// Show a status message
-	a.ui.ShowTemporaryStatus("Recording started", 2*time.Second)
-
-	// Define an audio callback to process the audio data
 	audioCallback := func(audioData []float32) {
 		a.mu.Lock()
 		// Only process if we're still listening
@@ -402,28 +354,25 @@ func (a *Application) startListening() {
 			a.mu.Unlock()
 			return
 		}
-		a.mu.Unlock()
 
 		// Calculate audio level
 		level := calculateRMSLevel(audioData)
+
+		// Store the level for inactivity detection
+		a.lastAudioLevel = level
+
+		a.mu.Unlock()
+
+		// Always update audio level for visualization, even if not processing for transcription
 		a.ui.UpdateAudioLevel(level)
 
 		// Process audio data for transcription
 		if a.transcriber != nil {
-			// Check if the audio level is sufficient to process (avoid processing silence)
-			// Using a more appropriate threshold based on real-world testing
-			if level > 0.01 { // Adjusted threshold for better noise rejection
-				logger.Debug(logger.CategoryAudio, "Processing audio chunk with level: %.4f", level)
-				// Discard the error since we're handling errors in the transcriber itself
-				a.transcriber.ProcessAudioChunk(audioData)
-				// We don't need to log errors here as the transcriber already handles error logging
-				// This eliminates repeated error messages in the logs
-				// The error is already logged in whisper_streaming_transcriber.go
-			} else {
-				// For very low level audio, we just update the UI but don't process
-				// This saves CPU and avoids unnecessary processing of silence
-				logger.Debug(logger.CategoryAudio, "Skipping processing for low-level audio: %.4f", level)
-			}
+			// Always process audio data regardless of level - let the transcriber decide
+			// This ensures we don't miss quiet speech
+			logger.Debug(logger.CategoryAudio, "Processing audio chunk with level: %.4f", level)
+			// Discard the error since we're handling errors in the transcriber itself
+			a.transcriber.ProcessAudioChunk(audioData)
 		}
 	}
 
@@ -454,7 +403,7 @@ func calculateRMSLevel(buffer []float32) float32 {
 
 	// Scale for UI display purposes - this scaling is UI-specific
 	// The scaling factor makes the visualization more sensitive
-	level = level * 5
+	level = level * 8 // Increase sensitivity for better visualization
 	if level > 1.0 {
 		level = 1.0
 	}
@@ -467,19 +416,26 @@ func (a *Application) stopListening() {
 	a.mu.Lock()
 	// Only do something if we're actually listening
 	wasListening := a.isListening
+
+	// Reset flagsto prevent start/stop loops
 	a.isListening = false
+
+	// Add a cooldown period to prevent accidental rapid stop/start
+	lastStartTime = time.Now()
 
 	// Signal the transcriber that recording has stopped
 	if a.transcriber != nil {
 		if confTranscriber, ok := a.transcriber.(transcription.ConfigurableTranscriber); ok {
 			// Set recording state to inactive to ensure proper cleanup
 			confTranscriber.SetRecordingState(false)
+			logger.Info(logger.CategoryTranscription, "Transcriber recording state set to inactive")
 		}
 	}
 
-	// Reset lastStartTime to allow immediate re-recording
-	lastStartTime = time.Time{}
 	a.mu.Unlock()
+
+	// Reset the audio level to zero for the waveform
+	a.ui.UpdateAudioLevel(0)
 
 	// Skip if we weren't listening
 	if !wasListening {
@@ -548,6 +504,10 @@ func main() {
 	// Print startup message
 	logger.Info(logger.CategoryApp, "Starting Ramble - Speech-to-Text Application")
 
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
 	if *useTUI {
 		logger.Info(logger.CategoryUI, "Using terminal-based UI")
 		runTerminalUI(*debugMode)
@@ -560,9 +520,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Set up signal handler to ensure cleanup
+	go func() {
+		<-sigChan
+		logger.Info(logger.CategoryApp, "Received termination signal, cleaning up resources...")
+		app.SafeCleanup()
+		os.Exit(0)
+	}()
+
 	err = app.Run()
 	if err != nil {
 		logger.Error(logger.CategoryApp, "Application error: %v", err)
+		app.SafeCleanup()
 		os.Exit(1)
 	}
 }

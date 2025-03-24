@@ -100,6 +100,11 @@ func (d *Detector) Stop() {
 
 // Helper function to check if the current event matches our hotkey configuration
 func isHotkeyPressed(ev hook.Event, config Config) bool {
+	// Only process keyboard events with actual characters
+	if ev.Keychar == 0 {
+		return false
+	}
+
 	// Convert the key from the event to string for comparison
 	keyChar := string(ev.Keychar)
 
@@ -109,24 +114,48 @@ func isHotkeyPressed(ev hook.Event, config Config) bool {
 	}
 
 	// Check if all required modifiers are pressed
-	// In gohook, modifiers are in the Rawcode field
-	isCtrlPressed := (ev.Rawcode & 0x01) != 0  // Control is bit 0
-	isShiftPressed := (ev.Rawcode & 0x02) != 0 // Shift is bit 1
-	isAltPressed := (ev.Rawcode & 0x04) != 0   // Alt is bit 2
+	// For gohook, we need to check the raw event flags
+	ctrlPressed := (ev.Rawcode & 1) != 0
+	shiftPressed := (ev.Rawcode & 2) != 0
+	altPressed := (ev.Rawcode & 4) != 0
 
-	// Map the required modifiers to their pressed state
-	modifierMap := map[string]bool{
-		"ctrl":  isCtrlPressed,
-		"shift": isShiftPressed,
-		"alt":   isAltPressed,
+	// Create a map of which modifiers are pressed
+	modifierState := map[string]bool{
+		"ctrl":  ctrlPressed,
+		"shift": shiftPressed,
+		"alt":   altPressed,
 	}
 
-	// Check if all required modifiers are pressed
+	// Verify all required modifiers are pressed
 	for _, mod := range config.Modifiers {
-		if !modifierMap[mod] {
+		mod = strings.ToLower(mod)
+		if !modifierState[mod] {
 			return false
 		}
 	}
 
-	return true
+	// Ensure no extra modifiers are pressed that aren't in our config
+	// This prevents triggering when extra modifiers are held
+	extraModifiers := true
+	if ctrlPressed && !containsIgnoreCase(config.Modifiers, "ctrl") {
+		extraModifiers = false
+	}
+	if shiftPressed && !containsIgnoreCase(config.Modifiers, "shift") {
+		extraModifiers = false
+	}
+	if altPressed && !containsIgnoreCase(config.Modifiers, "alt") {
+		extraModifiers = false
+	}
+
+	return extraModifiers
+}
+
+// Helper function to check if a string array contains a string (case insensitive)
+func containsIgnoreCase(arr []string, str string) bool {
+	for _, s := range arr {
+		if strings.EqualFold(s, str) {
+			return true
+		}
+	}
+	return false
 }
