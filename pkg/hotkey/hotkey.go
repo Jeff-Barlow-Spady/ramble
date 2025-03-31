@@ -105,49 +105,44 @@ func isHotkeyPressed(ev hook.Event, config Config) bool {
 		return false
 	}
 
-	// Convert the key from the event to string for comparison
+	// Added more strict modifier checking
+	// Get the current keychar as a string
 	keyChar := string(ev.Keychar)
 
-	// Check if the main key matches (case insensitive)
-	if !strings.EqualFold(keyChar, config.Key) {
+	// Convert the modifiers and key to lowercase for case-insensitive comparison
+	keyLower := strings.ToLower(config.Key)
+	keyCharLower := strings.ToLower(keyChar)
+
+	// First check if the key exactly matches our target key
+	if keyCharLower != keyLower {
 		return false
 	}
 
-	// Check if all required modifiers are pressed
-	// For gohook, we need to check the raw event flags
+	// Create a more strict check for modifiers
+	// Check the full state for each modifier
 	ctrlPressed := (ev.Rawcode & 1) != 0
 	shiftPressed := (ev.Rawcode & 2) != 0
 	altPressed := (ev.Rawcode & 4) != 0
 
-	// Create a map of which modifiers are pressed
-	modifierState := map[string]bool{
-		"ctrl":  ctrlPressed,
-		"shift": shiftPressed,
-		"alt":   altPressed,
+	// Verify that exactly the right modifiers are pressed
+	expectedCtrl := containsIgnoreCase(config.Modifiers, "ctrl")
+	expectedShift := containsIgnoreCase(config.Modifiers, "shift")
+	expectedAlt := containsIgnoreCase(config.Modifiers, "alt")
+
+	// Check that modifiers match exactly - not having a modifier pressed when
+	// it's not in the config counts as a match
+	if ctrlPressed != expectedCtrl {
+		return false
+	}
+	if shiftPressed != expectedShift {
+		return false
+	}
+	if altPressed != expectedAlt {
+		return false
 	}
 
-	// Verify all required modifiers are pressed
-	for _, mod := range config.Modifiers {
-		mod = strings.ToLower(mod)
-		if !modifierState[mod] {
-			return false
-		}
-	}
-
-	// Ensure no extra modifiers are pressed that aren't in our config
-	// This prevents triggering when extra modifiers are held
-	extraModifiers := true
-	if ctrlPressed && !containsIgnoreCase(config.Modifiers, "ctrl") {
-		extraModifiers = false
-	}
-	if shiftPressed && !containsIgnoreCase(config.Modifiers, "shift") {
-		extraModifiers = false
-	}
-	if altPressed && !containsIgnoreCase(config.Modifiers, "alt") {
-		extraModifiers = false
-	}
-
-	return extraModifiers
+	// If we get here, the key and modifiers match exactly
+	return true
 }
 
 // Helper function to check if a string array contains a string (case insensitive)

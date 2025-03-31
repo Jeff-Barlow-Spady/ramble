@@ -98,16 +98,19 @@ func NewRecorder(config Config) (*Recorder, error) {
 // The provided callback will be called with audio data
 func (r *Recorder) Start(callback func([]float32)) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if r.isRecording {
+		r.mu.Unlock()
 		return errors.New("recorder is already running")
 	}
 
+	// Store the callback
 	r.dataCallback = callback
 
-	// Get default host API for logging purposes only
+	// Debug logging - no need to hold the lock for this
 	if r.config.Debug {
+		r.mu.Unlock() // Release lock during potentially slow API calls
+
 		defaultHostApi, err := portaudio.DefaultHostApi()
 		if err == nil {
 			logger.Info(logger.CategoryAudio, "Using audio API: %s", defaultHostApi.Name)
@@ -119,9 +122,13 @@ func (r *Recorder) Start(callback func([]float32)) error {
 		} else {
 			logger.Warning(logger.CategoryAudio, "Could not get default host API: %v", err)
 		}
+
+		r.mu.Lock() // Reacquire lock
 	}
 
-	// Try to open the default audio stream
+	// Try to open the default audio stream - this can block, so release lock
+	r.mu.Unlock()
+
 	// Just use the default stream which is most compatible
 	stream, err := portaudio.OpenDefaultStream(
 		r.config.Channels, // Input channels
@@ -130,6 +137,8 @@ func (r *Recorder) Start(callback func([]float32)) error {
 		r.config.FramesPerBuffer,
 		r.processAudio,
 	)
+
+	r.mu.Lock() // Reacquire lock
 
 	if err != nil {
 		if r.config.Debug {
@@ -144,20 +153,28 @@ func (r *Recorder) Start(callback func([]float32)) error {
 				logger.Info(logger.CategoryAudio, "3. Create a minimal .asoundrc file in your home directory")
 			}
 		}
+		r.mu.Unlock()
 		return fmt.Errorf("failed to open audio stream: %w", err)
 	}
 
 	r.stream = stream
+
+	// Starting the stream can block, so release lock
+	r.mu.Unlock()
 	err = r.stream.Start()
+	r.mu.Lock()
+
 	if err != nil {
 		r.stream.Close()
 		if r.config.Debug {
 			logger.Error(logger.CategoryAudio, "Failed to start audio stream: %v", err)
 		}
+		r.mu.Unlock()
 		return fmt.Errorf("failed to start audio stream: %w", err)
 	}
 
 	r.isRecording = true
+	r.mu.Unlock()
 	return nil
 }
 
@@ -201,15 +218,57 @@ func (r *Recorder) Terminate() error {
 
 // Audio processing callback for PortAudio
 func (r *Recorder) processAudio(in, _ []float32) {
-	// Copy input data to our buffer
-	copy(r.buffer, in)
+	// Safety check for invalid or empty input data
+	if len(in) == 0 {
+		if r.config.Debug {
+			logger.Warning(logger.CategoryAudio, "PortAudio callback received empty buffer")
+		}
+		return
+	}
+
+	// Lock to avoid race conditions with Stop/Terminate
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// If no longer recording, don't process
+	if !r.isRecording {
+		return
+	}
+
+	// Check for corrupt audio samples (NaN or Inf)
+	hasCorruptSamples := false
+	for _, sample := range in {
+		if math.IsNaN(float64(sample)) || math.IsInf(float64(sample), 0) {
+			hasCorruptSamples = true
+			break
+		}
+	}
+
+	// Handle corrupt audio gracefully
+	if hasCorruptSamples {
+		if r.config.Debug {
+			logger.Warning(logger.CategoryAudio, "Detected corrupt audio samples in PortAudio callback")
+		}
+		// Generate silence instead
+		for i := range r.buffer {
+			r.buffer[i] = 0
+		}
+	} else {
+		// If data is valid, copy it to our buffer
+		copy(r.buffer, in)
+	}
 
 	// If a callback is registered, send the data
 	if r.dataCallback != nil {
 		// Make a copy to avoid race conditions
 		dataCopy := make([]float32, len(r.buffer))
 		copy(dataCopy, r.buffer)
+
+		// Execute callback outside the lock to prevent deadlocks
+		// Since we're already copied the data, it's safe to unlock
+		r.mu.Unlock()
 		r.dataCallback(dataCopy)
+		r.mu.Lock() // Reacquire the lock to match our defer
 	}
 }
 

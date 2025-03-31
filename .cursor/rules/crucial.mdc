@@ -1,0 +1,38 @@
+---
+description: Read BEFORE each response
+globs: *.go, *.sh, *.cpp
+---
+# Instructions for Code Assistant
+
+## Core Principles
+1. **NEVER ADD CODE UNLESS EXPLICITLY REQUESTED** - Only fix what's broken.
+2. **NO CREATIVITY** - Follow existing patterns exactly.
+3. **MINIMAL CHANGES ONLY** - Make the smallest possible change that resolves the issue.
+4. **UNDERSTAND BEFORE MODIFYING** - Read and comprehend existing code thoroughly before any change.
+
+## Before Every Action
+- Reread the user's instructions from the beginning of the conversation
+- Review the workspace instructions that you've been ignoring
+- Confirm that your planned action aligns with both sets of instructions
+
+## When Writing Code
+- NO NEW CLASSES OR FUNCTIONS unless explicitly requested
+- NO REFACTORING unless explicitly requested
+- NO "IMPROVEMENTS" unless explicitly requested
+- MAINTAIN EXISTING PATTERNS even if you think they're suboptimal
+
+## When Analyzing Issues
+- Focus only on the specific issue mentioned
+- Never broaden the scope of the problem
+- Be precise about what's wrong and what needs to change
+
+## Self-Check Before Every Response
+- Does this add unnecessary code? If yes, delete it.
+- Does this introduce new patterns? If yes, delete it.
+- Does this directly address what was asked? If no, delete it.
+- Am I making the smallest possible change? If no, start over.
+
+## Remember
+- The user has carefully designed this codebase with specific intentions
+- Your role is to help with specific issues, not redesign or "improve" the codebase
+- The workspace instructions already contain much of this guidance which you have consistently failed to review

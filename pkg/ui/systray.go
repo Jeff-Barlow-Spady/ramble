@@ -2,6 +2,7 @@ package ui
 
 import (
 	"log"
+	"sync"
 
 	"fyne.io/systray"
 	"github.com/jeff-barlow-spady/ramble/pkg/resources"
@@ -26,6 +27,8 @@ type SystemTray struct {
 
 	// Callbacks
 	onShowWindow func()
+
+	mu sync.Mutex
 }
 
 // NewSystemTray creates a new system tray icon
@@ -86,16 +89,38 @@ func (s *SystemTray) Stop() {
 
 // UpdateRecordingState updates the recording state in the systray menu
 func (s *SystemTray) UpdateRecordingState(isRecording bool) {
+	// Update internal state first
 	s.isRecording = isRecording
 
+	// Early return if systray menu isn't initialized yet
 	if s.mStartStop == nil {
 		return
 	}
 
+	// Update menu text safely
 	if isRecording {
 		s.mStartStop.SetTitle("Stop Recording")
 	} else {
 		s.mStartStop.SetTitle("Start Recording")
+	}
+
+	// Update icon based on recording state
+	var err error
+	var iconBytes []byte
+
+	if isRecording {
+		// Set red icon to indicate recording
+		iconBytes, err = resources.GetRedIconData()
+	} else {
+		// Return to normal icon
+		iconBytes, err = resources.GetIconData()
+	}
+
+	// Only update icon if we successfully loaded it
+	if err == nil && len(iconBytes) > 0 {
+		systray.SetIcon(iconBytes)
+	} else if err != nil {
+		log.Printf("Failed to update systray icon: %v", err)
 	}
 }
 
@@ -105,11 +130,14 @@ func (s *SystemTray) onReady() {
 	iconBytes, err := resources.GetIconData()
 	if err != nil {
 		log.Println("Failed to load systray icon:", err)
-		systray.SetIcon([]byte{})
-	} else {
-		systray.SetIcon(iconBytes)
+		// Use empty icon as fallback, but continue initialization
+		iconBytes = []byte{}
 	}
 
+	// Set the icon (empty is okay, systray will handle it)
+	systray.SetIcon(iconBytes)
+
+	// Set application name and tooltip
 	systray.SetTitle("Ramble")
 	systray.SetTooltip("Ramble Speech-to-Text")
 
@@ -121,22 +149,30 @@ func (s *SystemTray) onReady() {
 	s.mAbout = systray.AddMenuItem("About", "About Ramble")
 	s.mQuit = systray.AddMenuItem("Quit", "Quit Ramble")
 
-	// Handle menu item clicks
+	// Handle menu item clicks in a goroutine to keep the UI responsive
 	go func() {
 		for {
 			select {
 			case <-s.mStartStop.ClickedCh:
-				s.onStartStop()
+				if s.onStartStop != nil {
+					s.onStartStop()
+				}
 			case <-s.mShowWindow.ClickedCh:
 				if s.onShowWindow != nil {
 					s.onShowWindow()
 				}
 			case <-s.mPreferences.ClickedCh:
-				s.onPrefsClick()
+				if s.onPrefsClick != nil {
+					s.onPrefsClick()
+				}
 			case <-s.mAbout.ClickedCh:
-				s.onAboutClick()
+				if s.onAboutClick != nil {
+					s.onAboutClick()
+				}
 			case <-s.mQuit.ClickedCh:
-				s.onQuitClick()
+				if s.onQuitClick != nil {
+					s.onQuitClick()
+				}
 				return
 			}
 		}

@@ -18,6 +18,7 @@ type UIComponents struct {
 	ListenButton  *widget.Button
 	ClearButton   *widget.Button
 	CopyButton    *widget.Button
+	InsertButton  *widget.Button
 	StatusLabel   *canvas.Text
 	MainContent   *fyne.Container
 }
@@ -58,56 +59,70 @@ func createControlPanel(
 	onListen func(),
 	onClear func(),
 	onCopy func(),
-) (*fyne.Container, *widget.Button, *widget.Button, *widget.Button) {
-	// Create buttons with icons
+	onInsert func(),
+) (*fyne.Container, *widget.Button, *widget.Button, *widget.Button, *widget.Button) {
+	// Create more subtle buttons with icons but less prominent styling
 	listenButton := widget.NewButtonWithIcon("Record", theme.MediaRecordIcon(), onListen)
 	clearButton := widget.NewButtonWithIcon("Clear", theme.ContentClearIcon(), onClear)
 	copyButton := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), onCopy)
+	insertButton := widget.NewButtonWithIcon("Insert at Cursor", theme.ContentPasteIcon(), onInsert)
 
-	// Create control panel with buttons centered
-	controlPanel := container.NewHBox(
-		layout.NewSpacer(),
+	// Create vertical button stack with subtle separators and more compact spacing
+	controlPanel := container.NewVBox(
 		listenButton,
+		widget.NewSeparator(), // Add separator for visual spacing
 		clearButton,
+		widget.NewSeparator(), // Add separator for visual spacing
 		copyButton,
-		layout.NewSpacer(),
+		widget.NewSeparator(), // Add separator for visual spacing
+		insertButton,
+		layout.NewSpacer(), // Push buttons to the top
 	)
 
-	return controlPanel, listenButton, clearButton, copyButton
+	// Use less padding for a more compact control panel
+	paddedPanel := container.NewPadded(controlPanel)
+
+	return paddedPanel, listenButton, clearButton, copyButton, insertButton
 }
 
 // createStatusBar creates the status bar with audio visualization
 func createStatusBar(waveform *WaveformVisualizer) (*fyne.Container, *canvas.Text) {
-	// Create status label with improved style
-	statusLabel := canvas.NewText("Ready", theme.ForegroundColor())
+	// Create status label with improved style but less prominent
+	statusLabel := canvas.NewText("Ready", color.NRGBA{R: 220, G: 220, B: 220, A: 255})
 	statusLabel.TextSize = 14
 	statusLabel.Alignment = fyne.TextAlignCenter
 
-	// Start the waveform animation immediately
+	// Start the waveform animation immediately with higher amplitude
 	waveform.StartListening()
-	waveform.SetAmplitude(0.3) // Give it some initial movement
+	waveform.SetAmplitude(0.5) // Higher initial amplitude for more visibility
 
-	// Create a container with the waveform
-	waveformContainer := container.NewPadded(waveform)
+	// Create a container specifically for the waveform with a height that ensures visibility
+	waveformBg := canvas.NewRectangle(color.NRGBA{R: 20, G: 40, B: 80, A: 255})
 
-	// Make the waveform visually distinct with a background
-	audioBox := container.NewStack(
-		canvas.NewRectangle(theme.BackgroundColor()),
-		waveformContainer,
-	)
+	// Stack the waveform on top of the background
+	waveformStack := container.NewStack(waveformBg, waveform)
 
-	// Create a fixed size to ensure the waveform has adequate space
-	audioBox.Resize(fyne.NewSize(600, 150))
+	// Create a container for the waveform that ensures proper height
+	waveformContainer := container.NewStack(waveformStack)
 
-	// Create status bar with waveform, shortcut info, and status text
+	// Create a proper height for the waveform - significantly taller
+	waveformStack.Resize(fyne.NewSize(600, 80))
+
+	// Create a status bar with the waveform at the bottom of the application
 	statusBar := container.NewVBox(
-		container.NewPadded(audioBox),
-		widget.NewLabelWithStyle("Press 'R' to start/stop recording",
-			fyne.TextAlignCenter, fyne.TextStyle{Italic: true}),
-		container.NewHBox(layout.NewSpacer(), statusLabel, layout.NewSpacer()),
+		container.NewBorder(
+			nil, nil, // No top/bottom in this inner container
+			nil,         // No left component
+			statusLabel, // Status on right
+			nil,         // Nothing in center
+		),
+		waveformContainer, // Waveform gets its own full row for maximum height
 	)
 
-	return statusBar, statusLabel
+	// Use minimal padding to maximize waveform visibility
+	paddedStatusBar := container.NewPadded(statusBar)
+
+	return paddedStatusBar, statusLabel
 }
 
 // createMainUI creates the main UI layout
@@ -116,37 +131,72 @@ func createMainUI(
 	controlPanel *fyne.Container,
 	statusBar *fyne.Container,
 ) *fyne.Container {
-	// ASCII banner with improved alignment
-	bannerText := `
-	██████╗  █████╗ ███╗   ███╗██████╗ ██╗     ███████╗
-	██╔══██╗██╔══██╗████╗ ████║██╔══██╗██║     ██╔════╝
-	██████╔╝███████║██╔████╔██║██████╔╝██║     █████╗
-	██╔══██╗██╔══██║██║╚██╔╝██║██╔══██╗██║     ██╔══╝
-	██║  ██║██║  ██║██║ ╚═╝ ██║██████╔╝███████╗███████╗
-	╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═════╝ ╚══════╝╚══════╝
-						 Speech-to-Text Service
- `
+	// Create a deep blue background for the entire application
+	mainBg := canvas.NewRectangle(color.NRGBA{R: 8, G: 15, B: 35, A: 255})
 
-	banner := widget.NewLabelWithStyle(bannerText, fyne.TextAlignCenter, fyne.TextStyle{Monospace: true})
+	// Compressed ASCII banner designed to fit in sidebar
+	bannerText := `
+██████╗  █████╗ ███╗   ███╗██████╗ ██╗     ███████╗
+██╔══██╗██╔══██╗████╗ ████║██╔══██╗██║     ██╔════╝
+██████╔╝███████║██╔████╔██║██████╔╝██║     █████╗
+██╔══██╗██╔══██║██║╚██╔╝██║██╔══██╗██║     ██╔══╝
+██║  ██║██║  ██║██║ ╚═╝ ██║██████╔╝███████╗███████╗
+`
+
+	// Important: Use a widget.Label instead of canvas.Text for proper ASCII art rendering
+	banner := widget.NewLabelWithStyle(bannerText, fyne.TextAlignCenter,
+		fyne.TextStyle{Monospace: true, Bold: true})
+
+	// Set wrapping off to preserve ASCII art formatting
 	banner.Wrapping = fyne.TextWrapOff
 
-	// Create a container for the banner with a light background
-	bannerRect := canvas.NewRectangle(color.NRGBA{R: 40, G: 40, B: 40, A: 255})
-	bannerContainer := container.NewStack(
-		bannerRect,
-		container.NewPadded(banner),
+	// Add a simple subtitle
+	subtitle := canvas.NewText("Speech-to-Text Service", color.White)
+	subtitle.TextStyle = fyne.TextStyle{Bold: true}
+	subtitle.TextSize = 12
+	subtitle.Alignment = fyne.TextAlignCenter
+
+	// Create a container for the banner with padding and distinctive background
+	bannerBox := container.NewVBox(
+		banner,
+		subtitle,
 	)
 
-	// Fix the size to ensure proper alignment
-	bannerContainer.Resize(fyne.NewSize(900, 150))
+	// Create a fixed size container for the banner that fits properly
+	bannerContainer := container.NewStack(
+		canvas.NewRectangle(color.NRGBA{R: 15, G: 25, B: 60, A: 255}),
+		container.NewPadded(bannerBox),
+	)
+
+	// Make the banner container larger to ensure visibility
+	bannerContainer.Resize(fyne.NewSize(200, 130))
+
+	// Create a smaller, less prominent sidebar with standard button layout
+	paddedPanel := container.NewPadded(controlPanel)
+
+	// Use a border layout to create the sidebar with banner at top and buttons below
+	sidebar := container.NewBorder(
+		bannerContainer, // Banner at the top
+		nil, nil, nil,   // No elements for bottom/left/right
+		paddedPanel, // Control panel fills the rest
+	)
+
+	// Create a visually distinct sidebar background that's less prominent
+	sidebarBg := canvas.NewRectangle(color.NRGBA{R: 10, G: 18, B: 40, A: 255})
+	sidebarContainer := container.NewStack(
+		sidebarBg,
+		sidebar,
+	)
+
+	// Make the sidebar narrower to give more space to the transcript
+	sidebarContainer.Resize(fyne.NewSize(180, 800))
 
 	// Create a scroll container for the transcript
 	transcriptScroll := container.NewVScroll(transcriptBox)
 
-	// Make the transcript area with a reasonable height and better visibility
-	// Use a colored border to make it more prominent
-	transcriptBorder := canvas.NewRectangle(theme.PrimaryColor())
-	transcriptBackground := canvas.NewRectangle(color.NRGBA{R: 30, G: 30, B: 35, A: 255})
+	// Create transcript container with border and better contrast
+	transcriptBorder := canvas.NewRectangle(color.NRGBA{R: 45, G: 85, B: 135, A: 255})
+	transcriptBackground := canvas.NewRectangle(color.NRGBA{R: 15, G: 35, B: 60, A: 255})
 
 	transcriptContainer := container.NewStack(
 		transcriptBorder,
@@ -154,25 +204,30 @@ func createMainUI(
 		container.NewPadded(transcriptScroll),
 	)
 
-	// Create the main container with banner at top, waveform next, controls, and transcript at bottom
-	mainContent := container.NewVBox(
-		// Banner at the very top
-		bannerContainer,
-
-		// Waveform below the banner
-		container.NewPadded(statusBar),
-
-		// Control panel in the middle
-		container.NewPadded(controlPanel),
-
-		// Transcript at the bottom - make it larger by giving it more weight
-		container.NewPadded(transcriptContainer),
+	// Create a container for the transcript area with the status bar at the bottom
+	rightSide := container.NewBorder(
+		nil,       // No top component
+		statusBar, // Status bar at bottom
+		nil, nil,  // No left/right components
+		transcriptContainer, // Transcript takes remaining space
 	)
 
-	// Set height constraints to make the transcript larger - more space for text
-	transcriptContainer.Resize(fyne.NewSize(900, 365))
+	// Create the main layout with horizontal split between sidebar and content
+	mainLayout := container.NewHSplit(
+		sidebarContainer, // Left sidebar (fixed width)
+		rightSide,        // Right side (transcript + status)
+	)
 
-	return mainContent
+	// Set the split position to give the sidebar only 15% of the width (smaller than before)
+	mainLayout.Offset = 0.15
+
+	// Create the final container with background
+	finalContainer := container.NewStack(
+		mainBg,
+		mainLayout,
+	)
+
+	return finalContainer
 }
 
 // CreateUI creates all UI components and returns them in a struct
@@ -180,16 +235,18 @@ func CreateUI(
 	onListen func(),
 	onClear func(),
 	onCopy func(),
+	onInsert func(),
 	waveform *WaveformVisualizer,
 ) UIComponents {
 	// Create transcript area using the helper function
 	transcriptBox := createTranscriptArea()
 
 	// Create control panel using the helper function
-	controlPanel, listenButton, clearButton, copyButton := createControlPanel(
+	controlPanel, listenButton, clearButton, copyButton, insertButton := createControlPanel(
 		onListen,
 		onClear,
 		onCopy,
+		onInsert,
 	)
 
 	// Create status bar using the helper function
@@ -207,6 +264,7 @@ func CreateUI(
 		ListenButton:  listenButton,
 		ClearButton:   clearButton,
 		CopyButton:    copyButton,
+		InsertButton:  insertButton,
 		StatusLabel:   statusLabel,
 		MainContent:   mainContent,
 	}

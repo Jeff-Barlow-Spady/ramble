@@ -1,1 +1,0 @@
-/home/toasty/projects/Ramble/whisper.cpp/include/whisper.h

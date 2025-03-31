@@ -2,7 +2,11 @@
 package resources
 
 import (
+	"bytes"
 	"embed"
+	"image"
+	"image/color"
+	"image/png"
 	"io/fs"
 	"log"
 	"os"
@@ -41,6 +45,58 @@ func GetIconData() ([]byte, error) {
 		}
 	}
 	return iconData, nil
+}
+
+// GetRedIconData returns a red-tinted version of the icon for recording state
+func GetRedIconData() ([]byte, error) {
+	// Get the original icon
+	iconData, err := GetIconData()
+	if err != nil {
+		return nil, err
+	}
+
+	// Decode the PNG image
+	img, err := png.Decode(bytes.NewReader(iconData))
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a new RGBA image
+	bounds := img.Bounds()
+	redIcon := image.NewRGBA(bounds)
+
+	// Apply red tint
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			// Get original pixel color
+			originalColor := img.At(x, y)
+			r, g, b, a := originalColor.RGBA()
+
+			// Convert to 8-bit color components
+			r8 := uint8(r >> 8)
+			g8 := uint8(g >> 8)
+			b8 := uint8(b >> 8)
+			a8 := uint8(a >> 8)
+
+			// Create a redder version - enhance red channel and reduce others
+			redColor := color.RGBA{
+				R: r8,                       // Keep red as is
+				G: uint8(float32(g8) * 0.5), // Reduce green
+				B: uint8(float32(b8) * 0.5), // Reduce blue
+				A: a8,                       // Keep same alpha
+			}
+
+			redIcon.Set(x, y, redColor)
+		}
+	}
+
+	// Encode back to PNG
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, redIcon); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
 }
 
 // ExtractIcon extracts the application icon to the specified path

@@ -92,7 +92,13 @@ func (w *WaveformVisualizer) StartListening() {
 func (w *WaveformVisualizer) StopListening() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.animating = false
+
+	// Only change state if actually animating to prevent double-stops
+	if w.animating {
+		w.animating = false
+		// Log the state change for debugging
+		log.Println("Waveform animation stopped by explicit call")
+	}
 }
 
 // CreateRenderer implements the widget interface

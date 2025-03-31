@@ -7,7 +7,7 @@ set -e
 # Create a temporary working directory
 TEMP_DIR=$(mktemp -d)
 echo "Working in temporary directory: $TEMP_DIR"
-cd $TEMP_DIR
+cd "$TEMP_DIR"
 
 # Clone whisper.cpp repository
 echo "Cloning whisper.cpp repository..."
@@ -25,7 +25,7 @@ echo "Linux stream binary built and copied to embed directory"
 # Build for Windows (requires mingw)
 if command -v x86_64-w64-mingw32-gcc &> /dev/null; then
     echo "Building whisper stream for Windows (x64)..."
-    rm -f stream stream.exe *.o  # Clean up manually
+    rm -f stream stream.exe ./*.o  # Clean up manually with safer pattern
     CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ make stream
     mkdir -p ../../pkg/transcription/embed/binaries/windows-amd64
     cp stream.exe ../../pkg/transcription/embed/binaries/windows-amd64/whisper.exe
@@ -38,7 +38,7 @@ fi
 # This is a placeholder that will be skipped when running on Linux
 if [[ "$(uname)" == "Darwin" ]]; then
     echo "Building whisper stream for macOS (x64)..."
-    rm -f stream stream.exe *.o  # Clean up manually
+    rm -f stream stream.exe ./*.o  # Clean up manually with safer pattern
     make stream
     mkdir -p ../../pkg/transcription/embed/binaries/darwin-amd64
     cp stream ../../pkg/transcription/embed/binaries/darwin-amd64/whisper
@@ -56,6 +56,6 @@ touch ../../pkg/transcription/embed/models/small.bin
 
 echo "Cleaning up..."
 cd ../..
-rm -rf $TEMP_DIR
+rm -rf "$TEMP_DIR"
 
 echo "Stream binaries built successfully!"

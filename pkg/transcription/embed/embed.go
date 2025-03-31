@@ -17,6 +17,33 @@ var ErrAssetsNotEmbedded = errors.New("embedded assets not available")
 //go:embed binaries/linux-amd64/whisper models/tiny.bin models/small.bin
 var Assets embed.FS
 
+// Note on embedding full models for CI/CD and distribution:
+//
+// The current models/tiny.bin and models/small.bin are placeholder files (~573KB).
+// For CI/CD and distribution with full models embedded:
+//
+// 1. During the build process, download the full models to the embed directory:
+//    - Download ggml-tiny.en.bin to pkg/transcription/embed/models/tiny.bin
+//    - Download ggml-small.en.bin to pkg/transcription/embed/models/small.bin
+//
+// 2. These full model files will then be embedded in the binary via the go:embed directive
+//
+// 3. The binary size will increase significantly (~75MB for tiny.en, ~250MB for small.en)
+//    but no separate model files will be needed for distribution
+//
+// 4. ExtractModel will extract the full models to the user's model directory
+//    the first time the application runs
+//
+// Example CI/CD step for model embedding:
+// ```
+// # Download models for embedding
+// mkdir -p pkg/transcription/embed/models
+// curl -L https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin -o pkg/transcription/embed/models/tiny.bin
+//
+// # Build with the embedded model
+// go build -tags=whisper_go -o ramble ./cmd/ramble
+// ```
+
 // WhisperExecutableType represents the type of the embedded Whisper executable
 type WhisperExecutableType int
 

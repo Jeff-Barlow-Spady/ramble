@@ -1,0 +1,1194 @@
+// Package ramble is a cross-platform speech-to-text application
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/jeff-barlow-spady/ramble/pkg/audio"
+	"github.com/jeff-barlow-spady/ramble/pkg/hotkey"
+	"github.com/jeff-barlow-spady/ramble/pkg/logger"
+	"github.com/jeff-barlow-spady/ramble/pkg/transcription"
+	"github.com/jeff-barlow-spady/ramble/pkg/transcription/embed"
+	"github.com/jeff-barlow-spady/ramble/pkg/ui"
+)
+
+// Package-level variables for debounce and diagnostics
+var (
+	lastStartTime time.Time
+	lastHeartbeat time.Time
+)
+
+// Application manages the overall application state and components
+type Application struct {
+	hotkeyDetector *hotkey.Detector
+	audioRecorder  *audio.Recorder
+	transcriber    transcription.Transcriber
+	ui             *ui.App
+
+	isDebugMode bool
+	isListening bool
+	mu          sync.Mutex
+	exitChan    chan struct{}
+	cleanupOnce sync.Once // Ensure cleanup only happens once
+
+	// Track last audio level for inactivity detection
+	lastAudioLevel float32
+}
+
+// NewApplication creates a new application instance
+func NewApplication(debugMode bool) (*Application, error) {
+	// Initialize UI with test mode
+	uiApp := ui.NewWithOptions(debugMode)
+
+	// Initialize hotkey detector with default config (Ctrl+Shift+S)
+	hkConfig := hotkey.DefaultConfig()
+	hkDetector := hotkey.NewDetector(hkConfig)
+
+	// Initialize audio recorder with default config and debug mode
+	audioConfig := audio.DefaultConfig()
+	audioConfig.Debug = debugMode // Enable debug logs if in debug mode
+
+	// Create the audio recorder
+	var audioRecorder *audio.Recorder
+	var err error
+
+	// Create a proper audio recorder with debug mode
+	audioRecorder, err = audio.NewRecorder(audioConfig)
+	if err != nil {
+		logger.Warning(logger.CategoryAudio, "Audio initialization issue: %v", err)
+		logger.Info(logger.CategoryAudio, "You may need to configure your audio system or check permissions")
+		// We'll continue with a nil recorder and handle it gracefully
+	}
+
+	// Initialize transcriber with default config
+	transConfig := transcription.DefaultConfig()
+	transConfig.Debug = debugMode             // Enable debug logs if in debug mode
+	transConfig.PreferSystemExecutable = true // Prefer system-installed executable
+
+	// No need to change model size in debug mode - use the default (small)
+	// or previously selected model
+
+	// Create the transcriber
+	transcriber, err := transcription.NewTranscriber(transConfig)
+	if err != nil {
+		logger.Error(logger.CategoryTranscription, "Failed to initialize transcriber: %v", err)
+		// Continue with a nil transcriber - we'll handle this gracefully
+	}
+
+	// Update transcriber configuration
+	config := transcription.Config{
+		ModelSize: transConfig.ModelSize,
+		ModelPath: transConfig.ModelPath,
+		Language:  "", // Auto-detect language
+		Debug:     debugMode,
+	}
+
+	// Update transcriber if possible
+	if updater, ok := transcriber.(transcription.ConfigurableTranscriber); ok {
+		err := updater.UpdateConfig(config)
+		if err != nil {
+			logger.Warning(logger.CategoryTranscription,
+				"Failed to update transcriber configuration: %v", err)
+		}
+	}
+
+	app := &Application{
+		ui:             uiApp,
+		hotkeyDetector: hkDetector,
+		audioRecorder:  audioRecorder,
+		transcriber:    transcriber,
+		isDebugMode:    debugMode,
+		exitChan:       make(chan struct{}),
+		lastAudioLevel: 0,
+	}
+
+	// Set up streaming callback if the transcriber supports it
+	if confTranscriber, ok := transcriber.(transcription.ConfigurableTranscriber); ok {
+		logger.Info(logger.CategoryTranscription, "Setting up improved streaming callback")
+
+		// Keep track of processing state
+		var processingMutex sync.Mutex
+		isProcessing := false
+		processingStartTime := time.Time{}
+
+		// Get model info
+		modelSize, _ := confTranscriber.GetModelInfo()
+		logger.Info(logger.CategoryTranscription, "Using model size: %s", modelSize)
+
+		confTranscriber.SetStreamingCallback(func(text string) {
+			logger.Info(logger.CategoryTranscription, "Got streaming text: %s", text)
+
+			// Filter out all special tokens in brackets related to non-speech sounds
+			if strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]") {
+				// List of special tokens to filter completely
+				specialTokensToFilter := []string{
+					"[MUSIC]", "[MUSIC PLAYING]", "[APPLAUSE]", "[LAUGHTER]",
+					"[NOISE]", "[SILENCE]", "[BLANK_AUDIO]", "[INAUDIBLE]",
+					"[CROSSTALK]", "[SPEAKING FOREIGN LANGUAGE]", "[SPEAKING NON-ENGLISH]",
+				}
+
+				// Check if text matches any token to filter
+				for _, token := range specialTokensToFilter {
+					if strings.Contains(strings.ToUpper(text), strings.ToUpper(token)) {
+						logger.Info(logger.CategoryTranscription, "Filtering special token: %s", text)
+						return // Skip this token completely
+					}
+				}
+			}
+
+			// Process valid transcription text
+			logger.Info(logger.CategoryTranscription, "Updating transcript with: %s", text)
+			if app.ui != nil {
+				ui.RunOnMain(func() {
+					app.ui.AppendTranscript(text)
+				})
+			}
+		})
+
+		// Start a background goroutine to provide periodic updates during processing
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				<-ticker.C
+
+				processingMutex.Lock()
+				if isProcessing {
+					elapsedTime := time.Since(processingStartTime)
+					// Only show processing time if it's taking more than 1.5 seconds
+					if elapsedTime.Seconds() > 1.5 {
+						// Update the UI with the processing time
+						ui.RunOnMain(func() {
+							uiApp.ShowTemporaryStatus(fmt.Sprintf("Processing speech... (%.1f sec)", elapsedTime.Seconds()), 500*time.Millisecond)
+						})
+					}
+				}
+				processingMutex.Unlock()
+
+				// Check if we should exit this goroutine
+				select {
+				case <-app.exitChan:
+					return
+				default:
+					// Continue
+				}
+			}
+		}()
+	}
+
+	return app, nil
+}
+
+// Run starts the application event loop
+func (a *Application) Run() error {
+	// Set up UI callbacks
+	a.ui.SetCallbacks(
+		func() { a.startListening() },
+		func() { a.stopListening() },
+		func() { a.ui.UpdateTranscript("") },
+	)
+
+	// Set up quit callback with safe cleanup
+	a.ui.SetQuitCallback(func() {
+		a.SafeCleanup()
+		a.exitChan <- struct{}{}
+		logger.Info(logger.CategoryApp, "Application exit requested")
+	})
+
+	// Set up preferences callback
+	a.ui.SetPreferencesCallback(a.handlePreferencesChanged)
+
+	// Set up hotkey callback to toggle the hover window
+	a.ui.SetHotkeyCallback(func() {
+		logger.Info(logger.CategoryApp, "Hotkey detected, toggling recording")
+		// No need to implement this - it will be handled by the UI
+	})
+
+	// Start hotkey detection in background
+	go func() {
+		if a.isDebugMode {
+			logger.Info(logger.CategoryApp, "Hotkey detection disabled in debug mode")
+			return
+		}
+
+		err := a.hotkeyDetector.Start(func() {
+// Package ramble is a cross-platform speech-to-text application
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/jeff-barlow-spady/ramble/pkg/audio"
+	"github.com/jeff-barlow-spady/ramble/pkg/hotkey"
+	"github.com/jeff-barlow-spady/ramble/pkg/logger"
+	"github.com/jeff-barlow-spady/ramble/pkg/transcription"
+	"github.com/jeff-barlow-spady/ramble/pkg/transcription/embed"
+	"github.com/jeff-barlow-spady/ramble/pkg/ui"
+)
+
+// Package-level variables for debounce and diagnostics
+var (
+	lastStartTime time.Time
+	lastHeartbeat time.Time
+)
+
+// Application manages the overall application state and components
+type Application struct {
+	hotkeyDetector *hotkey.Detector
+	audioRecorder  *audio.Recorder
+	transcriber    transcription.Transcriber
+	ui             *ui.App
+
+	isDebugMode bool
+	isListening bool
+	mu          sync.Mutex
+	exitChan    chan struct{}
+	cleanupOnce sync.Once // Ensure cleanup only happens once
+
+	// Track last audio level for inactivity detection
+	lastAudioLevel float32
+}
+
+// NewApplication creates a new application instance
+func NewApplication(debugMode bool) (*Application, error) {
+	// Initialize UI with test mode
+	uiApp := ui.NewWithOptions(debugMode)
+
+	// Initialize hotkey detector with default config (Ctrl+Shift+S)
+	hkConfig := hotkey.DefaultConfig()
+	hkDetector := hotkey.NewDetector(hkConfig)
+
+	// Initialize audio recorder with default config and debug mode
+	audioConfig := audio.DefaultConfig()
+	audioConfig.Debug = debugMode // Enable debug logs if in debug mode
+
+	// Create the audio recorder
+	var audioRecorder *audio.Recorder
+	var err error
+
+	// Create a proper audio recorder with debug mode
+	audioRecorder, err = audio.NewRecorder(audioConfig)
+	if err != nil {
+		logger.Warning(logger.CategoryAudio, "Audio initialization issue: %v", err)
+		logger.Info(logger.CategoryAudio, "You may need to configure your audio system or check permissions")
+		// We'll continue with a nil recorder and handle it gracefully
+	}
+
+	// Initialize transcriber with default config
+	transConfig := transcription.DefaultConfig()
+	transConfig.Debug = debugMode             // Enable debug logs if in debug mode
+	transConfig.PreferSystemExecutable = true // Prefer system-installed executable
+
+	// No need to change model size in debug mode - use the default (small)
+	// or previously selected model
+
+	// Create the transcriber
+	transcriber, err := transcription.NewTranscriber(transConfig)
+	if err != nil {
+		logger.Error(logger.CategoryTranscription, "Failed to initialize transcriber: %v", err)
+		// Continue with a nil transcriber - we'll handle this gracefully
+	}
+
+	// Update transcriber configuration
+	config := transcription.Config{
+		ModelSize: transConfig.ModelSize,
+		ModelPath: transConfig.ModelPath,
+		Language:  "", // Auto-detect language
+		Debug:     debugMode,
+	}
+
+	// Update transcriber if possible
+	if updater, ok := transcriber.(transcription.ConfigurableTranscriber); ok {
+		err := updater.UpdateConfig(config)
+		if err != nil {
+			logger.Warning(logger.CategoryTranscription,
+				"Failed to update transcriber configuration: %v", err)
+		}
+	}
+
+	app := &Application{
+		ui:             uiApp,
+		hotkeyDetector: hkDetector,
+		audioRecorder:  audioRecorder,
+		transcriber:    transcriber,
+		isDebugMode:    debugMode,
+		exitChan:       make(chan struct{}),
+		lastAudioLevel: 0,
+	}
+
+	// Set up streaming callback if the transcriber supports it
+	if confTranscriber, ok := transcriber.(transcription.ConfigurableTranscriber); ok {
+		logger.Info(logger.CategoryTranscription, "Setting up improved streaming callback")
+
+		// Keep track of processing state
+		var processingMutex sync.Mutex
+		isProcessing := false
+		processingStartTime := time.Time{}
+
+		// Get model info
+		modelSize, _ := confTranscriber.GetModelInfo()
+		logger.Info(logger.CategoryTranscription, "Using model size: %s", modelSize)
+
+		confTranscriber.SetStreamingCallback(func(text string) {
+			logger.Info(logger.CategoryTranscription, "Got streaming text: %s", text)
+
+			// Filter out all special tokens in brackets related to non-speech sounds
+			if strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]") {
+				// List of special tokens to filter completely
+				specialTokensToFilter := []string{
+					"[MUSIC]", "[MUSIC PLAYING]", "[APPLAUSE]", "[LAUGHTER]",
+					"[NOISE]", "[SILENCE]", "[BLANK_AUDIO]", "[INAUDIBLE]",
+					"[CROSSTALK]", "[SPEAKING FOREIGN LANGUAGE]", "[SPEAKING NON-ENGLISH]",
+				}
+
+				// Check if text matches any token to filter
+				for _, token := range specialTokensToFilter {
+					if strings.Contains(strings.ToUpper(text), strings.ToUpper(token)) {
+						logger.Info(logger.CategoryTranscription, "Filtering special token: %s", text)
+						return // Skip this token completely
+					}
+				}
+			}
+
+			// Process valid transcription text
+			logger.Info(logger.CategoryTranscription, "Updating transcript with: %s", text)
+			if app.ui != nil {
+				ui.RunOnMain(func() {
+					app.ui.AppendTranscript(text)
+				})
+			}
+		})
+
+		// Start a background goroutine to provide periodic updates during processing
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				<-ticker.C
+
+				processingMutex.Lock()
+				if isProcessing {
+					elapsedTime := time.Since(processingStartTime)
+					// Only show processing time if it's taking more than 1.5 seconds
+					if elapsedTime.Seconds() > 1.5 {
+						// Update the UI with the processing time
+						ui.RunOnMain(func() {
+							uiApp.ShowTemporaryStatus(fmt.Sprintf("Processing speech... (%.1f sec)", elapsedTime.Seconds()), 500*time.Millisecond)
+						})
+					}
+				}
+				processingMutex.Unlock()
+
+				// Check if we should exit this goroutine
+				select {
+				case <-app.exitChan:
+					return
+				default:
+					// Continue
+				}
+			}
+		}()
+	}
+
+	return app, nil
+}
+
+// Run starts the application event loop
+func (a *Application) Run() error {
+	// Set up UI callbacks
+	a.ui.SetCallbacks(
+		func() { a.startListening() },
+		func() { a.stopListening() },
+		func() { a.ui.UpdateTranscript("") },
+	)
+
+	// Set up quit callback with safe cleanup
+	a.ui.SetQuitCallback(func() {
+		a.SafeCleanup()
+		a.exitChan <- struct{}{}
+		logger.Info(logger.CategoryApp, "Application exit requested")
+	})
+
+	// Set up preferences callback
+	a.ui.SetPreferencesCallback(a.handlePreferencesChanged)
+
+	// Set up hotkey callback to toggle the hover window
+	a.ui.SetHotkeyCallback(func() {
+		logger.Info(logger.CategoryApp, "Hotkey detected, toggling recording")
+		// No need to implement this - it will be handled by the UI
+	})
+
+	// Start hotkey detection in background
+	go func() {
+		if a.isDebugMode {
+			logger.Info(logger.CategoryApp, "Hotkey detection disabled in debug mode")
+			return
+		}
+
+		err := a.hotkeyDetector.Start(func() {
+			// Check if the main window is focused when hotkey is triggered
+			if a.ui.IsWindowFocused() {
+				logger.Info(logger.CategoryApp, "Ignoring hotkey while app window is focused")
+				return
+			}
+
+			logger.Info(logger.CategoryApp, "Hotkey triggered (app in background)")
+
+			// If app is not in listening state, start listening
+			a.mu.Lock()
+			isListening := a.isListening
+			a.mu.Unlock()
+
+			if !isListening {
+				// Start listening when hotkey is triggered
+				a.startListening()
+			} else {
+				// Stop listening when hotkey is triggered again
+				a.stopListening()
+			}
+		})
+
+		if err != nil {
+			logger.Warning(logger.CategoryApp, "Failed to start hotkey detection: %v", err)
+		}
+	}()
+
+	// Run the UI event loop
+	err := a.ui.Run()
+
+	// Ensure cleanup on exit
+	a.SafeCleanup()
+	return err
+}
+
+// handlePreferencesChanged handles preference changes
+func (a *Application) handlePreferencesChanged(prefs ui.Preferences) {
+	if a.transcriber != nil {
+		// Convert UI model selection to transcription model size
+		var modelSize transcription.ModelSize
+		switch prefs.ModelSize {
+		case "tiny":
+			modelSize = transcription.ModelTiny
+		case "base":
+			modelSize = transcription.ModelBase
+		case "small":
+			modelSize = transcription.ModelSmall
+		case "medium":
+			modelSize = transcription.ModelMedium
+		case "large":
+			modelSize = transcription.ModelLarge
+		default:
+			modelSize = transcription.ModelSmall
+		}
+
+		// Update transcriber configuration
+		config := transcription.Config{
+			ModelSize: modelSize,
+			ModelPath: prefs.TranscriptPath, // Use transcript path for models if specified
+			Language:  "",                   // Auto-detect language
+			Debug:     a.isDebugMode,
+		}
+
+		// Update transcriber if possible
+		if updater, ok := a.transcriber.(transcription.ConfigurableTranscriber); ok {
+			err := updater.UpdateConfig(config)
+			if err != nil {
+				logger.Warning(logger.CategoryTranscription,
+					"Failed to update transcriber configuration: %v", err)
+			}
+		}
+	}
+}
+
+// SafeCleanup ensures cleanup is only performed once
+func (a *Application) SafeCleanup() {
+	a.cleanupOnce.Do(func() {
+		// Stop listening if needed
+		a.stopListening()
+
+		// Clean up resources
+		a.Cleanup()
+
+		// Close exit channel
+		close(a.exitChan)
+	})
+}
+
+// startListening begins audio capture and transcription
+func (a *Application) startListening() {
+	a.mu.Lock()
+	// If already listening, do nothing (debounce)
+	if a.isListening {
+		a.mu.Unlock()
+		logger.Info(logger.CategoryAudio, "Already listening, ignoring start request")
+		return
+	}
+
+	// Implement a cooldown to prevent rapid start/stop
+	// If less than 800ms have passed since the last start/stop, ignore this request
+	// Increased from 500ms to provide better protection against accidental triggers
+	now := time.Now()
+	if !lastStartTime.IsZero() && now.Sub(lastStartTime) < 800*time.Millisecond {
+		a.mu.Unlock()
+		logger.Info(logger.CategoryAudio, "Ignoring start request due to cooldown period (< 800ms)")
+		return
+	}
+	lastStartTime = now
+
+	// Mark as listening before we start processing
+	a.isListening = true
+	logger.Info(logger.CategoryAudio, "Starting listening")
+
+	// Reset heartbeat timer to avoid immediate logging
+	lastHeartbeat = time.Now()
+
+	// Configure the transcriber for streaming mode if available
+	if a.transcriber != nil {
+		if confTranscriber, ok := a.transcriber.(transcription.ConfigurableTranscriber); ok {
+			// Set recording state to active
+			confTranscriber.SetRecordingState(true)
+			logger.Info(logger.CategoryTranscription, "Transcriber recording state set to active")
+		}
+	}
+
+	a.mu.Unlock()
+
+	// Ensure we have a valid audio recorder
+	if a.audioRecorder == nil {
+		logger.Info(logger.CategoryAudio, "Initializing audio recorder")
+		var err error
+		a.audioRecorder, err = audio.NewRecorder(audio.DefaultConfig())
+		if err != nil {
+			logger.Error(logger.CategoryAudio, "Failed to create audio recorder: %v", err)
+			a.isListening = false
+			a.ui.ShowTemporaryStatus("Error: Could not initialize audio", 3*time.Second)
+			return
+		}
+	}
+
+	// Provide immediate UI feedback that recording is starting
+	a.ui.ShowTemporaryStatus("Starting recording...", 1*time.Second)
+
+	// If we get this far but fail later, make sure we clean up
+	safetyCleanup := func() {
+		// If we panic or exit abruptly, make sure resources are cleaned up
+		go func() {
+			// Create a watchdog timer that monitors for signs of audio stream issues
+			watchdogTimer := time.NewTicker(10 * time.Second)
+			defer watchdogTimer.Stop()
+
+			// Keep track of last successful heartbeat
+			lastSuccess := time.Now()
+
+			// Use a separate goroutine for the long timeout to prevent blocking the watchdog
+			go func() {
+				// Wait up to 60 minutes (allows for very long continuous recordings)
+				time.Sleep(60 * time.Minute)
+				// Force cleanup after the maximum safe recording time
+				logger.Warning(logger.CategoryAudio, "Maximum recording time (60min) reached, stopping recording")
+				a.stopListening()
+			}()
+
+			// Run the watchdog loop to detect problems
+			for {
+				select {
+				case <-watchdogTimer.C:
+					a.mu.Lock()
+					stillListening := a.isListening
+					timeSinceHeartbeat := time.Since(lastHeartbeat)
+					a.mu.Unlock()
+
+					// If we're not listening anymore, exit the watchdog
+					if !stillListening {
+						return
+					}
+
+					// If we haven't received a heartbeat in too long, the audio stream might be dead
+					if timeSinceHeartbeat > 30*time.Second && lastHeartbeat.After(lastSuccess) {
+						// Update the last success time to prevent repeated triggers
+						lastSuccess = time.Now()
+						logger.Warning(logger.CategoryAudio, "No audio heartbeat received for 30s, audio stream may be dead")
+						// Don't force stop - this is just for diagnostics
+					}
+				}
+			}
+		}()
+	}
+
+	// Create a more robust audio callback that handles potential errors
+	audioCallback := func(audioData []float32) {
+		a.mu.Lock()
+		// Only process if we're still listening
+		if !a.isListening {
+			a.mu.Unlock()
+			return
+		}
+
+		// Calculate audio level
+		level := calculateRMSLevel(audioData)
+
+		// Log a heartbeat every 5 seconds to verify continuous audio processing
+		// Also check the audio recorder status to ensure it's still healthy
+		if time.Since(lastHeartbeat) > 5*time.Second {
+			logger.Info(logger.CategoryAudio, "Recording heartbeat - level: %.4f, still active", level)
+
+			// Add detailed diagnostics to help debug premature stops
+			logger.Debug(logger.CategoryAudio, "Audio diagnostics - buffer size: %d samples, timestamp: %s",
+				len(audioData), time.Now().Format(time.RFC3339Nano))
+
+			lastHeartbeat = time.Now()
+		}
+
+		// Store the level for visualization only - we don't use this for automatic stopping
+		a.lastAudioLevel = level
+
+		a.mu.Unlock()
+
+		// Always update audio level for visualization, even if not processing for transcription
+		a.ui.UpdateAudioLevel(level)
+
+		// Process audio data for transcription
+		if a.transcriber != nil {
+			// Always process audio data regardless of level - let the transcriber decide
+			// This ensures we don't miss quiet speech
+			logger.Debug(logger.CategoryAudio, "Processing audio chunk with level: %.4f", level)
+
+			// Track any errors from processing and log them
+			_, err := a.transcriber.ProcessAudioChunk(audioData)
+			if err != nil {
+				logger.Warning(logger.CategoryAudio, "Error processing audio chunk: %v", err)
+				// Don't stop recording on transient errors
+			}
+		}
+	}
+
+	// Start recording with the callback, with error recovery
+	var startErr error
+	maxRetries := 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		startErr = a.audioRecorder.Start(audioCallback)
+		if startErr == nil {
+			break // Success!
+		}
+
+		// Log the error
+		logger.Error(logger.CategoryAudio, "Attempt %d/%d: Failed to start audio recording: %v",
+			attempt+1, maxRetries, startErr)
+
+		// If this isn't our last attempt, try to recover
+		if attempt < maxRetries-1 {
+			// Try to recreate the audio recorder
+			if a.audioRecorder != nil {
+				a.audioRecorder.Terminate()
+			}
+
+			// Brief pause before retry
+			time.Sleep(500 * time.Millisecond)
+
+			// Recreate the recorder
+			audioConfig := audio.DefaultConfig()
+			audioConfig.Debug = a.isDebugMode
+			a.audioRecorder, _ = audio.NewRecorder(audioConfig)
+
+			logger.Info(logger.CategoryAudio, "Recreated audio recorder, retrying...")
+		}
+	}
+
+	// Check if all retries failed
+	if startErr != nil {
+		logger.Error(logger.CategoryAudio, "All attempts to start recording failed: %v", startErr)
+		a.mu.Lock()
+		a.isListening = false
+		a.mu.Unlock()
+		a.ui.ShowTemporaryStatus("Error: Failed to start recording after multiple attempts", 3*time.Second)
+
+		// Reset recording state if start failed
+		if a.transcriber != nil {
+			if confTranscriber, ok := a.transcriber.(transcription.ConfigurableTranscriber); ok {
+				confTranscriber.SetRecordingState(false)
+			}
+		}
+		return
+	}
+
+	// Success! Activate safety cleanup
+	safetyCleanup()
+}
+
+// calculateRMSLevel calculates audio level for visualization
+func calculateRMSLevel(buffer []float32) float32 {
+	// Use the base RMS calculation
+	level := audio.CalculateRMSLevel(buffer)
+
+	// Scale for UI display purposes - this scaling is UI-specific
+	// The scaling factor makes the visualization more sensitive
+	level = level * 8 // Increase sensitivity for better visualization
+	if level > 1.0 {
+		level = 1.0
+	}
+
+	return level
+}
+
+// stopListening stops audio capture and transcription
+func (a *Application) stopListening() {
+	// Record why and when the recording is being stopped for diagnostics
+	stopReason := "manual stop (user requested)"
+	stopTime := time.Now()
+	recordingDuration := ""
+
+	a.mu.Lock()
+	// Only do something if we're actually listening
+	wasListening := a.isListening
+
+	// Calculate recording duration for logging
+	if !lastStartTime.IsZero() {
+		duration := stopTime.Sub(lastStartTime)
+		recordingDuration = duration.String()
+	}
+
+	// Skip if we weren't listening
+	if !wasListening {
+		logger.Warning(logger.CategoryAudio, "stopListening called when not listening")
+		a.mu.Unlock()
+		return
+	}
+
+	// Log the stop with context
+	logger.Info(logger.CategoryAudio, "Stopping recording: reason=%s, duration=%s",
+		stopReason, recordingDuration)
+
+	// Reset flags to prevent start/stop loops
+	a.isListening = false
+
+	// Add a cooldown period to prevent accidental rapid stop/start
+	lastStartTime = time.Now()
+
+	// Signal the transcriber that recording has stopped
+	if a.transcriber != nil {
+		if confTranscriber, ok := a.transcriber.(transcription.ConfigurableTranscriber); ok {
+			// Set recording state to inactive to ensure proper cleanup
+			confTranscriber.SetRecordingState(false)
+			logger.Info(logger.CategoryTranscription, "Transcriber recording state set to inactive")
+		}
+	}
+
+	a.mu.Unlock()
+
+	// Reset the audio level to zero for the waveform
+	a.ui.UpdateAudioLevel(0)
+
+	// Log that we're about to stop
+	logger.Info(logger.CategoryAudio, "Stopping audio recording")
+
+	// Show a message that we're stopping - helps provide immediate feedback
+	a.ui.ShowTemporaryStatus("Stopping recording...", 1*time.Second)
+
+	// Stop the audio recorder with retry logic for clean shutdown
+	if a.audioRecorder != nil {
+		// Try multiple times to ensure a clean stop
+		maxStopRetries := 2
+		for i := 0; i <= maxStopRetries; i++ {
+			err := a.audioRecorder.Stop()
+			if err == nil {
+				// Successfully stopped
+				break
+			}
+
+			logger.Warning(logger.CategoryAudio, "Attempt %d/%d: Error stopping audio recording: %v",
+				i+1, maxStopRetries+1, err)
+
+			// If this is the last retry, give up but log it
+			if i == maxStopRetries {
+				logger.Error(logger.CategoryAudio, "Failed to cleanly stop audio recording after %d attempts", maxStopRetries+1)
+			} else {
+				// Brief pause before retry
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}
+
+	// Reset UI state with clear feedback
+	if a.ui != nil {
+		// Make sure the UI reflects that we've stopped listening
+		a.ui.ShowTemporaryStatus("Recording stopped", 2*time.Second)
+
+		// Append a note to the transcript to indicate recording has stopped
+		// This helps users understand the state of the application
+		a.ui.AppendTranscript("\n\n(Recording stopped)")
+	}
+
+	// Final log entry for statistics
+	logger.Info(logger.CategoryAudio, "Recording stopped successfully: duration=%s", recordingDuration)
+}
+
+// Cleanup releases resources
+func (a *Application) Cleanup() {
+	a.stopListening()
+
+	if a.audioRecorder != nil {
+		a.audioRecorder.Terminate()
+	}
+
+	if a.transcriber != nil {
+		a.transcriber.Close()
+	}
+
+	a.hotkeyDetector.Stop()
+}
+
+func main() {
+	// Parse command-line flags
+	debugMode := flag.Bool("debug", false, "Run in debug mode")
+	useTUI := flag.Bool("t", false, "Use text-based UI instead of GUI")
+	startInBackground := flag.Bool("b", false, "Start the application in background (minimized to system tray)")
+	flag.Parse()
+
+	// Initialize logger
+	logger.Initialize()
+
+	// Configure logger based on debug mode
+	if *debugMode {
+		logger.SetLevel(logger.LevelDebug)
+		logger.Info(logger.CategoryApp, "Debug mode enabled - verbose logging active")
+	} else {
+		// In normal mode, suppress common ALSA warnings
+		logger.SuppressASLAWarnings(true)
+	}
+
+	// Print startup message
+	logger.Info(logger.CategoryApp, "Starting Ramble - Speech-to-Text Application")
+
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	if *useTUI {
+		logger.Info(logger.CategoryUI, "Using terminal-based UI")
+		runTerminalUI(*debugMode)
+		return
+	}
+
+	app, err := NewApplication(*debugMode)
+	if err != nil {
+		logger.Error(logger.CategoryApp, "Failed to initialize application: %v", err)
+		os.Exit(1)
+	}
+
+	// If starting in background, hide the main window
+	if *startInBackground {
+		logger.Info(logger.CategoryUI, "Starting application in background mode")
+		app.ui.SetStartHidden(true)
+	}
+
+	// Set up signal handler to ensure cleanup
+	go func() {
+		<-sigChan
+		logger.Info(logger.CategoryApp, "Received termination signal, cleaning up resources...")
+		app.SafeCleanup()
+		os.Exit(0)
+	}()
+
+	err = app.Run()
+	if err != nil {
+		logger.Error(logger.CategoryApp, "Application error: %v", err)
+		app.SafeCleanup()
+		os.Exit(1)
+	}
+}
+
+// runTerminalUI runs the application with a terminal UI
+func runTerminalUI(debugMode bool) {
+	// Set up a buffer for logs instead of writing directly to the console
+	// This will capture logs and allow us to display them in a controlled manner
+	logBuffer := &ui.LogBuffer{}
+
+	// Redirect logger output to our buffer - critical for clean TUI experience
+	logger.SetOutput(logBuffer)
+
+	// Create a terminal UI
+	terminalUI := ui.NewTerminalUI("Ctrl+Shift+S")
+
+	// Connect the log buffer to the terminal UI so logs can be displayed properly
+	logBuffer.SetLogConsumer(terminalUI)
+
+	// Create a terminal-based executable selector for the transcription package
+	termSelector := ui.NewTerminalExecutableSelector()
+
+	// Initialize audio recorder with default config
+	audioConfig := audio.DefaultConfig()
+	audioConfig.Debug = debugMode
+
+	audioRecorder, err := audio.NewRecorder(audioConfig)
+	if err != nil {
+		logger.Warning(logger.CategoryAudio, "Audio initialization issue: %v", err)
+		logger.Info(logger.CategoryAudio, "You may need to configure your audio system or check permissions")
+	}
+
+	// Initialize transcriber with terminal selector
+	transConfig := transcription.DefaultConfig()
+	transConfig.Debug = debugMode
+
+	// Redirect transcription process output to our buffer or /dev/null
+	// This prevents whisper output from interfering with our UI
+	transConfig.RedirectProcessOutput = true
+
+	// Create transcription service with the terminal selector
+	var transcriber transcription.Transcriber
+
+	// Create the transcriber with UI selector
+	transcriber, err = createTranscriberWithSelector(transConfig, termSelector)
+	if err != nil {
+		logger.Error(logger.CategoryTranscription, "Failed to initialize transcriber: %v", err)
+		// Continue with a nil transcriber - we'll handle it gracefully
+		transcriber = nil
+	} else {
+		// Log successful initialization
+		logger.Info(logger.CategoryTranscription, "Transcriber initialized successfully")
+	}
+
+	// Set up streaming callback if the transcriber supports it
+	if confTranscriber, ok := transcriber.(transcription.ConfigurableTranscriber); ok {
+		// Get model info
+		modelSize, modelPath := confTranscriber.GetModelInfo()
+		logger.Info(logger.CategoryTranscription, "Using model size: %s at path: %s", modelSize, modelPath)
+
+		confTranscriber.SetStreamingCallback(func(text string) {
+			if text == "Processing audio..." {
+				terminalUI.AddLog("Processing audio...")
+				return
+			}
+
+			// Handle completion and other status messages
+			if text == "No speech detected" || text == "Transcription timeout - try again" || text == "Processing complete" {
+				terminalUI.AddLog(text)
+				return
+			}
+
+			// Filter out special tokens in brackets related to non-speech sounds
+			if strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]") {
+				// List of special tokens to filter completely
+				specialTokensToFilter := []string{
+					"[MUSIC]", "[MUSIC PLAYING]", "[APPLAUSE]", "[LAUGHTER]",
+					"[NOISE]", "[SILENCE]", "[BLANK_AUDIO]", "[INAUDIBLE]",
+					"[CROSSTALK]", "[SPEAKING FOREIGN LANGUAGE]", "[SPEAKING NON-ENGLISH]",
+				}
+
+				// Check if text matches any token to filter
+				for _, token := range specialTokensToFilter {
+					if strings.Contains(strings.ToUpper(text), strings.ToUpper(token)) {
+						logger.Debug(logger.CategoryTranscription, "Filtering special token: %s", text)
+						return // Skip this token completely
+					}
+				}
+			}
+
+			// For actual transcription text
+			if text != "" && !strings.HasPrefix(text, "(") {
+				// Log that we got transcription text
+				logger.Debug(logger.CategoryTranscription, "Transcription text: %s", text)
+				terminalUI.UpdateText(text)
+			}
+		})
+	}
+
+	// Start the terminal UI
+	terminalUI.Start()
+
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Setup recording toggle handler
+	isRecording := false
+	statusChan := terminalUI.GetStatusChannel()
+
+	// Start a goroutine to handle recording state changes and signals
+	go func() {
+		for {
+			select {
+			case <-statusChan:
+				// Toggle recording state
+				if isRecording {
+					// Stop recording
+					if audioRecorder != nil {
+						audioRecorder.Stop()
+					}
+					isRecording = false
+					terminalUI.SetRecordingState(false)
+					terminalUI.AddLog("Recording stopped")
+				} else {
+					// Start recording
+					if audioRecorder != nil {
+						// Define an audio callback to process the audio data
+						audioCallback := func(audioData []float32) {
+							// Calculate audio level
+							level := calculateRMSLevel(audioData)
+							terminalUI.UpdateAudioLevel(level)
+
+							// Process audio data for transcription
+							if transcriber != nil {
+								// Check if the audio level is sufficient to process (avoid processing silence)
+								// Using a more appropriate threshold based on real-world testing
+								if level > 0.01 { // Adjusted threshold for better noise rejection
+									logger.Debug(logger.CategoryAudio, "Processing audio chunk with level: %.4f", level)
+									// Discard the error since we're handling errors in the transcriber itself
+									transcriber.ProcessAudioChunk(audioData)
+									// We don't need to log errors here as the transcriber already handles error logging
+									// This eliminates repeated error messages in the logs
+									// The error is already logged in whisper_streaming_transcriber.go
+								} else {
+									// For very low level audio, we just update the UI but don't process
+									// This saves CPU and avoids unnecessary processing of silence
+									logger.Debug(logger.CategoryAudio, "Skipping processing for low-level audio: %.4f", level)
+								}
+							} else if debugMode && transcriber != nil {
+								// In debug mode, log when audio is below threshold
+								terminalUI.AddLog(fmt.Sprintf("Audio below threshold: %.4f", level))
+
+								// In debug mode, process even when below threshold to help diagnose issues
+								// Discard the error since we're handling errors in the transcriber itself
+								transcriber.ProcessAudioChunk(audioData)
+								// We don't need to log errors here as the transcriber already handles error logging
+							}
+						}
+
+						// Start audio recording with callback
+						err := audioRecorder.Start(audioCallback)
+						if err != nil {
+							logger.Error(logger.CategoryAudio, "Failed to start recording: %v", err)
+							terminalUI.AddLog("Failed to start recording")
+							continue
+						}
+					}
+					isRecording = true
+					terminalUI.SetRecordingState(true)
+					terminalUI.AddLog("Recording started")
+
+					// Clear previous transcription when starting new recording
+					terminalUI.UpdateText("")
+				}
+			case <-sigChan:
+				// Cleanup on signal
+				if audioRecorder != nil {
+					audioRecorder.Stop()
+					audioRecorder.Terminate()
+				}
+				if transcriber != nil {
+					transcriber.Close()
+				}
+				terminalUI.Stop()
+				return
+			}
+		}
+	}()
+
+	// Run the terminal UI (blocks until UI exits)
+	err = terminalUI.RunBlocking()
+	if err != nil {
+		// This error happens after UI exits, so we can print to console directly
+		fmt.Fprintf(os.Stderr, "Terminal UI error: %v\n", err)
+	}
+
+	// Cleanup when UI exits
+	if audioRecorder != nil {
+		audioRecorder.Terminate()
+	}
+	if transcriber != nil {
+		transcriber.Close()
+	}
+
+	// Restore logger output to stderr for any remaining logs after UI closes
+	logger.SetOutput(os.Stderr)
+}
+
+// createTranscriberWithSelector creates a transcriber using the UI selector for executables
+func createTranscriberWithSelector(config transcription.Config, selector ui.ExecutableSelectorUI) (transcription.Transcriber, error) {
+	// Define a simple adapter to connect UI selectors to the transcription package
+	execSelector := &uiSelectorAdapter{selector}
+
+	// Ensure debug settings for improved diagnostics
+	if config.Debug {
+		// Add debug logs for the transcription process
+		logger.Info(logger.CategoryTranscription, "Creating transcriber with debug mode enabled")
+	}
+
+	// Try to use embedded executable if available
+	var execPath string
+	var err error
+
+	// First, try to use embedded executable from the embed package
+	execPath, err = embed.GetWhisperExecutable()
+	if err == nil {
+		logger.Info(logger.CategoryTranscription, "Using embedded whisper executable")
+		config.ExecutablePath = execPath
+	} else {
+		// If embedded executable not available, use system version with UI selector
+		// Get all executables using the finder
+		if config.Finder == nil {
+			config.Finder = transcription.DefaultConfig().Finder
+		}
+
+		// Find all available executables
+		execs := config.Finder.FindAllExecutables()
+
+		// If we have an explicit path, use it
+		if config.ExecutablePath != "" {
+			execPath = config.ExecutablePath
+		} else if len(execs) > 1 {
+			// If we have multiple executables, let the user select
+			selected, err := execSelector.SelectExecutable(execs)
+			if err == nil {
+				config.ExecutablePath = selected
+			} else {
+				// If selection failed, use the first one
+				config.ExecutablePath = execs[0]
+			}
+		} else if len(execs) == 1 {
+			// If we have just one executable, use it
+			config.ExecutablePath = execs[0]
+		} else {
+			// Try to install one if possible
+			execPath, err = config.Finder.InstallExecutable()
+			if err == nil {
+				config.ExecutablePath = execPath
+			}
+		}
+	}
+
+	// Try to use embedded model if available
+	modelPath, err := embed.ExtractModel(string(config.ModelSize))
+	if err == nil {
+		logger.Info(logger.CategoryTranscription, "Using embedded model: %s", config.ModelSize)
+		config.ModelPath = modelPath
+	}
+
+	// Now create the transcriber with the configured executable
+	return transcription.NewTranscriber(config)
+}
+
+// uiSelectorAdapter adapts UI selectors to transcription.ExecutableSelector
+type uiSelectorAdapter struct {
+	uiSelector ui.ExecutableSelectorUI
+}
+
+// SelectExecutable implements the transcription.ExecutableSelector interface
+func (a *uiSelectorAdapter) SelectExecutable(executables []string) (string, error) {
+	return a.uiSelector.SelectExecutable(executables)
+}
