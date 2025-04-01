@@ -10,18 +10,12 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.4
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/ggerganov/whisper.cpp/bindings/go v0.0.0
-	github.com/go-audio/wav v1.1.0
 	github.com/gordonklaus/portaudio v0.0.0-20230709114228-aafa478834f5
 	github.com/robotn/gohook v0.40.0
 )
 
-require (
-	github.com/go-audio/audio v1.0.0 // indirect
-	github.com/go-audio/riff v1.0.0 // indirect
-)
-
 // Replace directive to use local whisper.cpp bindings
-replace github.com/ggerganov/whisper.cpp/bindings/go => ./whisper.cpp/bindings/go
+replace github.com/ggerganov/whisper.cpp/bindings/go => ./third_party/whisper.cpp/bindings/go
 
 require (
 	github.com/BurntSushi/toml v1.4.0 // indirect

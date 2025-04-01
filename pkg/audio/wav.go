@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jeff-barlow-spady/ramble/pkg/logger"
+	logger "github.com/jeff-barlow-spady/ramble/pkg/logger"
 )
 
 // SaveToWav saves audio samples to a WAV file

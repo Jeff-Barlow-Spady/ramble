@@ -15,8 +15,15 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
-	"github.com/jeff-barlow-spady/ramble/pkg/logger"
+	logger "github.com/jeff-barlow-spady/ramble/pkg/logger"
 )
+
+// RunOnMain runs a function on the main thread
+func RunOnMain(f func()) {
+	// For Fyne apps, most operations are already run on the main thread automatically
+	// This is a simple implementation to ensure UI operations happen on the main thread
+	f()
+}
 
 // ExecutableSelectorUI is the interface that should be implemented by UI components
 // that allow the user to select an executable

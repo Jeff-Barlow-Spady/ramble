@@ -1,127 +1,121 @@
 # Ramble
 
-Ramble is a speech transcription and note-taking application focused on simplicity and privacy.
+Ramble is a speech-to-text transcription application that provides real-time transcription using the Whisper model.
 
-## Features
+## Project Structure
 
-- Real-time speech-to-text transcription
-- Note organization and editing
-- Privacy-focused (all processing happens locally)
-- Cross-platform support
-- Customizable transcription models
+```
+ramble/
+├── cmd/
+│   └── ramble/         # Main application code
+├── pkg/                # Package code for reusable components
+│   └── transcription/  # Transcription engine implementation
+├── scripts/            # Build and installation scripts
+│   ├── build-dist.sh   # Main distribution builder
+│   ├── linux/          # Linux-specific scripts
+│   └── windows/        # Windows-specific scripts
+├── dist/               # Distribution output (created by build scripts)
+│   ├── linux/          # Linux distribution files
+│   └── windows/        # Windows distribution files
+├── assets/             # Application assets (icons, etc.)
+└── models/             # Default speech recognition models
+```
+
+## Building the Application
+
+### Prerequisites
+
+#### For Linux Build
+- Go 1.18 or later
+- GCC and development libraries
+- ALSA development libraries (`libasound2-dev`)
+- GTK3 development libraries (`libgtk-3-dev`)
+
+#### For Windows Cross-Compilation
+- MinGW-w64 cross-compiler (`x86_64-w64-mingw32-gcc`)
+- Windows libraries (placed in `lib/windows/`)
+
+### Build Process
+
+To build distribution packages for all supported platforms:
+
+```bash
+./scripts/build-dist.sh
+```
+
+To build for a specific platform only:
+
+```bash
+./scripts/build-dist.sh linux
+# or
+./scripts/build-dist.sh windows
+```
+
+The resulting distribution packages will be created in the `dist/` directory.
 
 ## Installation
 
-### Pre-built Binaries
+### Linux
 
-Download the latest release for your platform from the [Releases](https://gitlab.com/username/ramble/-/releases) page.
-
-### From Source
-
-Requirements:
-- Go 1.21 or later
-- C compiler (for building whisper.cpp)
+Extract the Linux distribution package and run:
 
 ```bash
-# Clone the repository
-git clone https://gitlab.com/username/ramble.git
-cd ramble
-
-# Build with Go bindings for optimal performance
-./build-go-bindings.sh
-make build
-
-# Or build without Go bindings (less efficient)
-go build -o ramble ./cmd/ramble
+./install.sh
 ```
 
-## Speech Recognition
-
-Ramble uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for speech recognition. The application supports multiple integration methods in order of preference:
-
-1. **Go Bindings** (recommended): Direct integration with whisper.cpp through its Go bindings
-2. Executable-based approach: Using whisper.cpp executables
-
-### Using Go Bindings (Recommended)
-
-For optimal performance and reliability, we recommend using the Go bindings for whisper.cpp:
+Alternatively, for portable use without installation:
 
 ```bash
-# Build with Go bindings
-./build-go-bindings.sh
-make build
+./ramble.sh
 ```
 
-The Go bindings provide:
-- Better performance (no subprocess overhead)
-- Improved reliability (no IPC issues)
-- True streaming support
-- Lower resource usage
+### Windows
 
-See [README-GO-BINDINGS.md](README-GO-BINDINGS.md) for detailed information about using the Go bindings.
-
-### Executable-based Approach (Legacy)
-
-The application will also work with whisper executables:
-
-1. Use embedded executables if available
-2. Search for whisper.cpp in your PATH
-3. Check common installation locations
-4. Attempt to auto-download the executable (on supported platforms)
-
-For detailed information, see [Whisper Usage Documentation](docs/WHISPER_USAGE.md).
-
-### Whisper Models
-
-Ramble supports multiple model sizes from tiny to large, trading off between speed and accuracy. The models are automatically downloaded if not found locally.
-
-## Usage
-
-```bash
-# Start the application
-./ramble
-
-# Specify a custom model path
-./ramble --model-path /path/to/model.bin
-
-# Use a larger model for better accuracy
-./ramble --model-size medium
-```
-
-## Configuration
-
-Ramble can be configured through command-line flags or a configuration file.
-
-```bash
-# View available options
-./ramble --help
-```
+Extract the Windows distribution package and run either:
+- `install.ps1` (PowerShell, recommended)
+- `install.bat` (Command Prompt)
 
 ## Development
 
-### Setting up the Development Environment
+### Running the Application Locally
 
 ```bash
-# Install development dependencies
-go get -d ./...
-
-# Build whisper.cpp with Go bindings (for best performance)
-./build-go-bindings.sh
-
-# Run tests
-go test ./...
+# From project root
+./scripts/run.sh
 ```
 
-### Testing with Different Models
+### Working with Go Bindings for Whisper.cpp
 
-```bash
-# Run with a specific model
-go run ./cmd/ramble --model-size tiny
-```
+Ramble uses the Whisper.cpp library for speech-to-text transcription through the official Go bindings from the Whisper.cpp repository, which provides several benefits:
 
-## Contributing
+1. **Performance**: Direct integration with the C++ library without subprocess overhead
+2. **Reliability**: Avoids many potential failure points of subprocess-based approaches
+3. **Real-time streaming**: Native support for streaming audio transcription
+4. **Resource efficiency**: No need to launch external processes
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+#### Setting up Whisper.cpp with Go Bindings
+
+1. Build the Go bindings for Whisper.cpp:
+   ```bash
+   ./scripts/build-go-bindings.sh
+   ```
+
+2. Troubleshooting Go bindings:
+   - If you encounter compilation failures, make sure you have the necessary dependencies installed:
+     ```bash
+     # Ubuntu/Debian
+     sudo apt-get install build-essential libomp-dev
+     ```
+   - If you encounter import errors, rebuild the whisper.cpp components:
+     ```bash
+     ./scripts/build-go-bindings.sh --clean
+     ```
+
+### Adding Libraries
+
+Place platform-specific libraries in:
+- `lib/*.so` for Linux shared objects
+- `lib/windows/*.dll` for Windows DLLs
 
 ## License
 

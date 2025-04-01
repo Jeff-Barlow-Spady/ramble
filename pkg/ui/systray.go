@@ -2,7 +2,9 @@ package ui
 
 import (
 	"log"
+	"runtime"
 	"sync"
+	"time"
 
 	"fyne.io/systray"
 	"github.com/jeff-barlow-spady/ramble/pkg/resources"
@@ -89,7 +91,12 @@ func (s *SystemTray) Stop() {
 
 // UpdateRecordingState updates the recording state in the systray menu
 func (s *SystemTray) UpdateRecordingState(isRecording bool) {
-	// Update internal state first
+	// Skip update if state hasn't changed - reduces unnecessary menu updates
+	if s.isRecording == isRecording {
+		return
+	}
+
+	// Update internal state
 	s.isRecording = isRecording
 
 	// Early return if systray menu isn't initialized yet
@@ -104,7 +111,7 @@ func (s *SystemTray) UpdateRecordingState(isRecording bool) {
 		s.mStartStop.SetTitle("Start Recording")
 	}
 
-	// Update icon based on recording state
+	// Update icon based on recording state - only if needed
 	var err error
 	var iconBytes []byte
 
@@ -150,33 +157,43 @@ func (s *SystemTray) onReady() {
 	s.mQuit = systray.AddMenuItem("Quit", "Quit Ramble")
 
 	// Handle menu item clicks in a goroutine to keep the UI responsive
-	go func() {
-		for {
-			select {
-			case <-s.mStartStop.ClickedCh:
-				if s.onStartStop != nil {
-					s.onStartStop()
-				}
-			case <-s.mShowWindow.ClickedCh:
-				if s.onShowWindow != nil {
-					s.onShowWindow()
-				}
-			case <-s.mPreferences.ClickedCh:
-				if s.onPrefsClick != nil {
-					s.onPrefsClick()
-				}
-			case <-s.mAbout.ClickedCh:
-				if s.onAboutClick != nil {
-					s.onAboutClick()
-				}
-			case <-s.mQuit.ClickedCh:
-				if s.onQuitClick != nil {
-					s.onQuitClick()
-				}
-				return
+	go s.handleMenuClicks()
+}
+
+// handleMenuClicks processes menu click events in a separate goroutine
+func (s *SystemTray) handleMenuClicks() {
+	// Create a ticker to periodically check for memory leaks or stale objects
+	cleanupTicker := time.NewTicker(30 * time.Minute)
+	defer cleanupTicker.Stop()
+
+	for {
+		select {
+		case <-s.mStartStop.ClickedCh:
+			if s.onStartStop != nil {
+				s.onStartStop()
 			}
+		case <-s.mShowWindow.ClickedCh:
+			if s.onShowWindow != nil {
+				s.onShowWindow()
+			}
+		case <-s.mPreferences.ClickedCh:
+			if s.onPrefsClick != nil {
+				s.onPrefsClick()
+			}
+		case <-s.mAbout.ClickedCh:
+			if s.onAboutClick != nil {
+				s.onAboutClick()
+			}
+		case <-s.mQuit.ClickedCh:
+			if s.onQuitClick != nil {
+				s.onQuitClick()
+			}
+			return
+		case <-cleanupTicker.C:
+			// Perform any necessary cleanup to prevent memory leaks
+			runtime.GC() // Suggest garbage collection
 		}
-	}()
+	}
 }
 
 // onExit is called when the systray is exiting

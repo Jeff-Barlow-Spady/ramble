@@ -6,12 +6,13 @@ package transcription
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ggerganov/whisper.cpp/bindings/go/pkg/whisper"
-	"github.com/jeff-barlow-spady/ramble/pkg/logger"
+	logger "github.com/jeff-barlow-spady/ramble/pkg/logger"
 )
 
 // WhisperTranscriber implements direct access to whisper.cpp Go bindings with proper buffer management
@@ -322,12 +323,23 @@ func (t *WhisperTranscriber) configureContext() {
 	// Basic configuration - language, performance settings
 	_ = t.context.SetLanguage("en")
 
-	// Lower thread count to reduce CPU usage (adjust based on your CPU)
-	t.context.SetThreads(4) // Reduced from 8 to 4
+	// Dynamically set thread count based on available CPU cores
+	numCPU := runtime.NumCPU()
+	// Use at most half of available cores to leave resources for UI
+	threadCount := numCPU / 2
+	if threadCount < 2 {
+		threadCount = 2 // Minimum of 2 threads
+	} else if threadCount > 6 {
+		threadCount = 6 // Maximum of 6 threads to avoid excessive CPU usage
+	}
+	t.context.SetThreads(uint(threadCount))
 
+	logger.Info(logger.CategoryTranscription,
+		"Configuring whisper with %d threads (from %d available cores)",
+		threadCount, numCPU)
+
+	// Configure for balanced accuracy and performance
 	t.context.SetSplitOnWord(true)
-
-	// Configure to reduce CPU usage
 	t.context.SetMaxSegmentLength(0)   // Don't artificially limit segments
 	t.context.SetTokenTimestamps(true) // Enable timestamps for words
 }

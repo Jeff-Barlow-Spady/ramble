@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/gordonklaus/portaudio"
-	"github.com/jeff-barlow-spady/ramble/pkg/logger"
+	logger "github.com/jeff-barlow-spady/ramble/pkg/logger"
 )
 
 // Configuration for audio recording

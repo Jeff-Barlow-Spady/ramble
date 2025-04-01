@@ -23,7 +23,7 @@ import (
 
 // App represents the main application
 type App struct {
-	ui          *ui.Simple
+	ui          *ui.App
 	transcriber *transcription.WhisperTranscriber
 	audio       *audio.Capture
 	debug       bool
@@ -40,10 +40,16 @@ func New(debug bool) (*App, error) {
 	}
 
 	// Setup UI
-	app.ui = ui.NewSimple()
+	app.ui = ui.NewWithOptions(debug)
 	app.ui.SetCallbacks(
 		app.startRecording,
 		app.stopRecording,
+		func() {
+			// Handle clear transcript
+			app.mu.Lock()
+			app.fullText = ""
+			app.mu.Unlock()
+		},
 	)
 
 	// Find model path
@@ -96,7 +102,7 @@ func (a *App) startRecording() {
 
 	// Start the transcriber
 	a.transcriber.SetRecordingState(true)
-	a.ui.ShowStatus("Starting recording...")
+	a.ui.ShowTemporaryStatus("Starting recording...", 2*time.Second)
 
 	// Start audio capture with callback
 	err := a.audio.Start(func(samples []float32) {
@@ -118,7 +124,7 @@ func (a *App) startRecording() {
 		return
 	}
 
-	a.ui.ShowStatus("Recording...")
+	a.ui.SetState(ui.StateListening)
 }
 
 // stopRecording ends audio capture and transcription
@@ -135,7 +141,7 @@ func (a *App) stopRecording() {
 		a.transcriber.SetRecordingState(false)
 	}
 
-	a.ui.ShowStatus("Idle")
+	a.ui.SetState(ui.StateIdle)
 }
 
 // appendToFullText adds text to the complete transcript

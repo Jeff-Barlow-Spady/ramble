@@ -112,6 +112,12 @@ func (w *WaveformVisualizer) CreateRenderer() fyne.WidgetRenderer {
 	return renderer
 }
 
+// MinSize implements the Widget interface - make sure it takes up enough space
+func (w *WaveformVisualizer) MinSize() fyne.Size {
+	// Return a reasonable minimum size that ensures visibility
+	return fyne.NewSize(400, 60)
+}
+
 // startAnimation is the animation loop for the waveform
 func (w *WaveformVisualizer) startAnimation() {
 	// Add panic recovery to prevent application crashes
@@ -157,7 +163,7 @@ func (w *WaveformVisualizer) startAnimation() {
 
 		// Request repaint and wait for next frame
 		canvas.Refresh(w)
-		time.Sleep(time.Second / 20) // 20 FPS animation is sufficient
+		time.Sleep(time.Second / 10) // Reduced from 20 FPS to 10 FPS for significantly less CPU usage
 	}
 }
 
@@ -193,25 +199,47 @@ func (w *WaveformVisualizer) drawWaveform(width, height int) image.Image {
 	}
 
 	// Calculate bar width and spacing
-	barWidth := (width - w.barCount) / w.barCount
+	// Reduce bar count when window is narrow to avoid excessive drawing operations
+	effectiveBarCount := w.barCount
+	if width < 100 {
+		effectiveBarCount = w.barCount / 2
+	}
+
+	barWidth := (width - effectiveBarCount) / effectiveBarCount
 	if barWidth < 2 {
 		barWidth = 2 // Minimum bar width
 	}
 
-	spacing := (width - (barWidth * w.barCount)) / (w.barCount + 1)
+	spacing := (width - (barWidth * effectiveBarCount)) / (effectiveBarCount + 1)
 	if spacing < 1 {
 		spacing = 1
 	}
 
 	// Draw equalizer bars (mirrored top and bottom)
-	for i := 0; i < w.barCount; i++ {
-		level := w.levels[i]
+	for i := 0; i < effectiveBarCount; i++ {
+		// Skip drawing every other bar if width is very small to improve performance
+		if width < 50 && i%2 == 1 {
+			continue
+		}
+
+		// Ensure index is in bounds
+		levelIndex := (i * w.barCount) / effectiveBarCount
+		if levelIndex >= len(w.levels) {
+			levelIndex = len(w.levels) - 1
+		}
+
+		level := w.levels[levelIndex]
 
 		// Calculate bar position
 		x := spacing + i*(barWidth+spacing)
 
 		// Calculate bar height (scaled to half-height, mirrored)
 		barHeight := int(level * float32(height) * 0.45)
+
+		// Skip drawing very small bars to improve performance
+		if barHeight < 2 {
+			continue
+		}
 
 		// Draw top bar (going up from center)
 		for y := centerY; y >= centerY-barHeight; y-- {

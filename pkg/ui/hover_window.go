@@ -158,20 +158,45 @@ func (hw *HoverWindow) UpdateTranscript(text string) {
 
 // AppendTranscript adds text to the current transcript
 func (hw *HoverWindow) AppendTranscript(text string) {
+	if text == "" {
+		return
+	}
+
+	trimmedText := strings.TrimSpace(text)
+	if trimmedText == "" {
+		return
+	}
+
 	current := hw.transcriptBox.Text
 
 	// Replace the placeholder if it's the initial text
 	if current == "Ready for transcription..." {
-		hw.transcriptBox.SetText(text)
+		hw.transcriptBox.SetText(trimmedText)
 		return
 	}
 
 	// Otherwise append with proper spacing
-	newText := current
-	if !strings.HasSuffix(current, "\n") && !strings.HasPrefix(text, "\n") {
-		newText += " "
+	var newText string
+
+	// Check if we need a new paragraph, space, or nothing
+	if strings.HasSuffix(current, ".") || strings.HasSuffix(current, "!") ||
+		strings.HasSuffix(current, "?") || strings.HasSuffix(current, "\n") {
+		// After end of sentence
+		if len(trimmedText) > 0 && trimmedText[0] >= 'A' && trimmedText[0] <= 'Z' {
+			// New paragraph for capitalized text after sentence
+			newText = current + "\n\n" + trimmedText
+		} else {
+			// Just space after sentence
+			newText = current + " " + trimmedText
+		}
+	} else if !strings.HasSuffix(current, " ") && !strings.HasPrefix(trimmedText, " ") {
+		// Add space between words
+		newText = current + " " + trimmedText
+	} else {
+		// No additional space needed
+		newText = current + trimmedText
 	}
-	newText += text
+
 	hw.transcriptBox.SetText(newText)
 }
 
