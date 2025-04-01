@@ -34,18 +34,20 @@ const (
 
 // App manages the Fyne application and UI components
 type App struct {
-	fyneApp            fyne.App
-	mainWindow         fyne.Window
-	transcriptBox      *widget.Entry
-	statusLabel        *canvas.Text
-	listenButton       *widget.Button
-	waveform           *WaveformVisualizer
-	systray            *SystemTray
-	appTitle           *canvas.Text
-	state              AppState
-	isTestMode         bool
-	currentPreferences Preferences
-	keyHandlerEnabled  bool
+	fyneApp                    fyne.App
+	mainWindow                 fyne.Window
+	transcriptBox              *widget.Entry
+	streamingPreview           *widget.Entry
+	finalizedSegmentsContainer *fyne.Container
+	statusLabel                *canvas.Text
+	listenButton               *widget.Button
+	waveform                   *WaveformVisualizer
+	systray                    *SystemTray
+	appTitle                   *canvas.Text
+	state                      AppState
+	isTestMode                 bool
+	currentPreferences         Preferences
+	keyHandlerEnabled          bool
 
 	// Hover window for compact UI
 	hoverWindow *HoverWindow
@@ -60,6 +62,11 @@ type App struct {
 	onClearTranscript    func()
 	onQuit               func()
 	onPreferencesChanged func(Preferences)
+
+	// For managing finalized segments
+	pendingSegment        string
+	finalizedSegmentTexts []string
+	currentSessionText    string // Accumulates text for the current recording session
 }
 
 // New creates a new UI application
@@ -93,13 +100,14 @@ func NewWithOptions(testMode bool) *App {
 	prefs.DarkTheme = true // Default to dark theme
 
 	app := &App{
-		fyneApp:            fyneApp,
-		mainWindow:         mainWindow,
-		systray:            systray,
-		state:              StateIdle,
-		isTestMode:         testMode,
-		currentPreferences: prefs,
-		keyHandlerEnabled:  true,
+		fyneApp:               fyneApp,
+		mainWindow:            mainWindow,
+		systray:               systray,
+		state:                 StateIdle,
+		isTestMode:            testMode,
+		currentPreferences:    prefs,
+		keyHandlerEnabled:     true,
+		finalizedSegmentTexts: make([]string, 0),
 	}
 
 	// Set up window close event to minimize instead of quit
@@ -155,6 +163,17 @@ func (a *App) setupUI() {
 	a.transcriptBox.SetMinRowsVisible(12)
 	a.transcriptBox.TextStyle = fyne.TextStyle{Monospace: true} // Monospace for better readability
 
+	// Create the streaming preview area
+	a.streamingPreview = widget.NewMultiLineEntry()
+	a.streamingPreview.Disable() // Make read-only but still selectable
+	a.streamingPreview.SetPlaceHolder("Live transcription will appear here...")
+	a.streamingPreview.Wrapping = fyne.TextWrapWord
+	a.streamingPreview.TextStyle = fyne.TextStyle{Italic: true} // Indicate this is not final text
+
+	// Create the finalized segments container
+	segmentsBox := container.NewVBox()
+	a.finalizedSegmentsContainer = container.NewMax(container.NewVScroll(segmentsBox))
+
 	// Create a frame around the waveform with centered content that fills the width
 	waveformContainer := container.New(layout.NewMaxLayout(),
 		canvas.NewRectangle(color.NRGBA{R: 30, G: 36, B: 66, A: 255}),
@@ -164,7 +183,7 @@ func (a *App) setupUI() {
 	// Create a fixed size container for the waveform to ensure adequate height
 	// This will wrap our container to ensure minimum height but allow horizontal expansion
 	heightSetter := canvas.NewRectangle(color.Transparent)
-	heightSetter.SetMinSize(fyne.NewSize(0, 100))
+	heightSetter.SetMinSize(fyne.NewSize(0, 80))
 
 	waveformWithHeight := container.New(layout.NewMaxLayout(),
 		heightSetter,
@@ -173,9 +192,6 @@ func (a *App) setupUI() {
 
 	// Create a padded container for the waveform that expands horizontally
 	waveformPadded := container.NewPadded(waveformWithHeight)
-
-	// Create a full-width container
-	waveformSection := container.New(layout.NewMaxLayout(), waveformPadded)
 
 	// Create the buttons
 	a.listenButton = widget.NewButtonWithIcon("Start Recording", theme.MediaRecordIcon(), a.toggleListening)
@@ -203,12 +219,15 @@ func (a *App) setupUI() {
 	// Add fixed padding around the banner
 	paddedBanner := container.NewPadded(bannerContainer)
 
+	// Create a settings button
+	settingsButton := widget.NewButtonWithIcon("", theme.SettingsIcon(), a.showPreferencesDialog)
+
 	// Arrange header with banner at top
 	header := container.NewVBox(
 		paddedBanner,
 		container.NewHBox(
 			layout.NewSpacer(),
-			widget.NewButtonWithIcon("", theme.SettingsIcon(), a.showPreferencesDialog),
+			settingsButton,
 		),
 		widget.NewSeparator(),
 	)
@@ -223,22 +242,57 @@ func (a *App) setupUI() {
 		),
 	)
 
+	// Create status bar
+	statusBar := container.NewVBox(
+		buttons,
+		waveformPadded,
+		container.NewHBox(layout.NewSpacer(), statusContainer, layout.NewSpacer()),
+	)
+
+	// Create the tabbed container to separate the different views
+	tabs := container.NewAppTabs(
+		container.NewTabItem("Live Session",
+			container.NewBorder(
+				nil,
+				nil,
+				nil,
+				nil,
+				container.NewVSplit(
+					a.streamingPreview,
+					a.finalizedSegmentsContainer,
+				),
+			),
+		),
+		container.NewTabItem("Full Transcript",
+			container.NewBorder(
+				nil,
+				nil,
+				nil,
+				nil,
+				a.transcriptBox,
+			),
+		),
+	)
+
+	// Set the tab location to the top
+	tabs.SetTabLocation(container.TabLocationTop)
+
+	// Set the split ratio - give more space to the finalized segments
+	vsplit := tabs.Items[0].Content.(*fyne.Container).Objects[0].(*container.Split)
+	vsplit.Offset = 0.25 // 25% for streaming, 75% for finalized segments
+
 	// Create main content with border layout
 	content := container.NewBorder(
-		// Top - banner and controls
+		// Top - banner and header
 		header,
 		// Bottom - waveform and status
-		container.NewVBox(
-			buttons,
-			waveformSection,
-			container.NewHBox(layout.NewSpacer(), statusContainer, layout.NewSpacer()),
-		),
+		statusBar,
 		// Left - none
 		nil,
 		// Right - none
 		nil,
-		// Center - transcript with scroll and padding
-		container.NewPadded(container.NewScroll(a.transcriptBox)),
+		// Center - tabbed container
+		tabs,
 	)
 
 	// Set the window content
@@ -376,8 +430,6 @@ func (a *App) SetState(state AppState) {
 		a.mainWindow.SetTitle("Ramble")
 		a.listenButton.SetText("Start Recording")
 		a.listenButton.SetIcon(theme.MediaRecordIcon())
-		a.appTitle.Color = color.NRGBA{R: 100, G: 140, B: 240, A: 255} // Reset to normal blue
-		a.appTitle.Refresh()
 	case StateListening:
 		a.statusLabel.Text = "● RECORDING"
 		a.statusLabel.Color = color.RGBA{R: 255, G: 50, B: 50, A: 255}
@@ -385,8 +437,6 @@ func (a *App) SetState(state AppState) {
 		a.mainWindow.SetTitle("Ramble - Recording...")
 		a.listenButton.SetText("Stop Recording")
 		a.listenButton.SetIcon(theme.MediaStopIcon())
-		a.appTitle.Color = color.NRGBA{R: 200, G: 50, B: 50, A: 255} // Red to indicate recording
-		a.appTitle.Refresh()
 	case StateTranscribing:
 		a.statusLabel.Text = "Transcribing..."
 		a.statusLabel.Color = color.RGBA{R: 255, G: 165, B: 0, A: 255}
@@ -416,6 +466,10 @@ func (a *App) AppendTranscript(text string) {
 		return
 	}
 
+	// In the two-stage process, this becomes the streaming preview update
+	a.UpdateStreamingPreview(trimmedText)
+
+	// For backward compatibility, also update the classic transcriptBox
 	current := a.transcriptBox.Text
 	if current == "" || current == "Your transcription will appear here..." {
 		a.transcriptBox.SetText(trimmedText)
@@ -543,10 +597,29 @@ func (a *App) copyTranscript() {
 	}
 }
 
-// clearTranscript clears the transcript text
+// clearTranscript clears the transcript text and all finalized segments
 func (a *App) clearTranscript() {
+	// Clear the classic view transcript
 	a.transcriptBox.SetText("")
-	a.ShowTemporaryStatus("Transcript cleared", 2*time.Second)
+
+	// Clear the streaming preview
+	a.streamingPreview.SetText("")
+	a.pendingSegment = ""
+	a.currentSessionText = ""
+
+	// Clear the finalized segments
+	a.finalizedSegmentTexts = make([]string, 0)
+
+	// Clear the finalized segments container
+	if a.finalizedSegmentsContainer != nil {
+		scrollContainer := a.finalizedSegmentsContainer.Objects[0].(*container.Scroll)
+		if segmentsBox, ok := scrollContainer.Content.(*fyne.Container); ok {
+			segmentsBox.Objects = nil
+			scrollContainer.Refresh()
+		}
+	}
+
+	a.ShowTemporaryStatus("All transcriptions cleared", 2*time.Second)
 
 	if a.onClearTranscript != nil {
 		a.onClearTranscript()
@@ -635,4 +708,155 @@ func (a *App) GetPreferences() Preferences {
 // ShowErrorDialog displays an error dialog with title and message
 func (a *App) ShowErrorDialog(title, message string) {
 	dialog.ShowError(fmt.Errorf("%s", message), a.mainWindow)
+}
+
+// UpdateStreamingPreview updates the streaming preview text with raw transcription
+// DEPRECATED: No longer needed as the streaming preview is handled directly in AppendSessionText
+func (a *App) UpdateStreamingPreview(text string) {
+	if a.streamingPreview == nil {
+		return
+	}
+
+	// Simply set the text in the streaming preview
+	a.streamingPreview.SetText(text)
+
+	// Auto-scroll to bottom when new text is added
+	if a.streamingPreview.CursorRow < len(strings.Split(a.streamingPreview.Text, "\n"))-1 {
+		a.streamingPreview.CursorRow = len(strings.Split(a.streamingPreview.Text, "\n")) - 1
+	}
+}
+
+// AppendSessionText appends text to the current session's accumulated text
+func (a *App) AppendSessionText(text string) {
+	if text == "" {
+		return
+	}
+
+	// Show raw model output in the streaming preview (what the model is currently processing)
+	a.streamingPreview.SetText(text)
+
+	// For the current session, simply accumulate text with proper spacing
+	if a.currentSessionText == "" {
+		a.currentSessionText = text
+	} else {
+		// Trust the manager.go's output and just append with spacing
+		a.currentSessionText += " " + text
+	}
+}
+
+// FinalizeTranscriptionSegment adds the current session text to the finalized segments
+// This should be called when a recording session ends
+func (a *App) FinalizeTranscriptionSegment() {
+	// If there's no session text, nothing to finalize
+	if a.currentSessionText == "" {
+		return
+	}
+
+	finalText := a.currentSessionText
+	a.currentSessionText = "" // Reset for the next session
+
+	// Clear the streaming preview
+	a.streamingPreview.SetText("")
+	a.pendingSegment = ""
+
+	// Add the text to the finalized segments array
+	a.finalizedSegmentTexts = append(a.finalizedSegmentTexts, finalText)
+
+	// Create a new segment card
+	segmentCard := createTranscriptionSegmentCard(
+		finalText,
+		func() {
+			// Delete segment
+			a.deleteTranscriptionSegment(finalText)
+		},
+		func() {
+			// Save segment
+			a.saveTranscriptionSegment(finalText)
+		},
+	)
+
+	// Add the card to the UI container
+	// First, we need to extract the VBox from inside the scroll container
+	scrollContainer := a.finalizedSegmentsContainer.Objects[0].(*container.Scroll)
+	segmentsBox := scrollContainer.Content.(*fyne.Container)
+
+	// Add the new card to the segments box
+	segmentsBox.Add(segmentCard)
+
+	// Refresh the container to reflect changes
+	segmentsBox.Refresh()
+	scrollContainer.Refresh()
+
+	// Also update the classic view transcriptBox
+	if a.transcriptBox.Text == "" || a.transcriptBox.Text == "Your transcription will appear here..." {
+		a.transcriptBox.SetText(finalText)
+	} else {
+		current := a.transcriptBox.Text
+		a.transcriptBox.SetText(current + "\n\n" + finalText)
+	}
+
+	// Auto-scroll to bottom of the finalized segments
+	scrollContainer.ScrollToBottom()
+}
+
+// deleteTranscriptionSegment removes a segment from the finalized segments
+func (a *App) deleteTranscriptionSegment(text string) {
+	// Remove from internal storage
+	for i, segment := range a.finalizedSegmentTexts {
+		if segment == text {
+			a.finalizedSegmentTexts = append(a.finalizedSegmentTexts[:i], a.finalizedSegmentTexts[i+1:]...)
+			break
+		}
+	}
+
+	// Rebuild the UI container (simpler than trying to find and remove a specific card)
+	scrollContainer := a.finalizedSegmentsContainer.Objects[0].(*container.Scroll)
+	segmentsBox := scrollContainer.Content.(*fyne.Container)
+
+	// Clear the current segments
+	segmentsBox.Objects = nil
+
+	// Rebuild with the remaining segments
+	for _, segment := range a.finalizedSegmentTexts {
+		segmentCard := createTranscriptionSegmentCard(
+			segment,
+			func() {
+				a.deleteTranscriptionSegment(segment)
+			},
+			func() {
+				a.saveTranscriptionSegment(segment)
+			},
+		)
+		segmentsBox.Add(segmentCard)
+	}
+
+	// Update the classic view transcriptBox
+	a.rebuildClassicViewText()
+}
+
+// saveTranscriptionSegment saves a segment for later use
+func (a *App) saveTranscriptionSegment(text string) {
+	// Implement the save functionality (e.g., to a file or clipboard)
+	clipboard.SetText(text)
+
+	// Show a temporary status message
+	a.ShowTemporaryStatus("Segment saved to clipboard", 2*time.Second)
+}
+
+// rebuildClassicViewText rebuilds the classic view text from the finalized segments
+func (a *App) rebuildClassicViewText() {
+	if len(a.finalizedSegmentTexts) == 0 {
+		a.transcriptBox.SetText("")
+		return
+	}
+
+	text := strings.Join(a.finalizedSegmentTexts, "\n\n")
+	a.transcriptBox.SetText(text)
+}
+
+// ProcessStreamingTranscription handles incoming transcription text in the two-stage process
+// DEPRECATED: Use AppendSessionText instead
+func (a *App) ProcessStreamingTranscription(text string) {
+	// This method is deprecated, use AppendSessionText instead
+	a.AppendSessionText(text)
 }

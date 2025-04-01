@@ -14,13 +14,15 @@ import (
 
 // UIComponents holds all the UI components
 type UIComponents struct {
-	TranscriptBox *widget.Entry
-	ListenButton  *widget.Button
-	ClearButton   *widget.Button
-	CopyButton    *widget.Button
-	InsertButton  *widget.Button
-	StatusLabel   *canvas.Text
-	MainContent   *fyne.Container
+	TranscriptBox     *widget.Entry
+	StreamingPreview  *widget.Entry
+	FinalizedSegments *fyne.Container
+	ListenButton      *widget.Button
+	ClearButton       *widget.Button
+	CopyButton        *widget.Button
+	InsertButton      *widget.Button
+	StatusLabel       *canvas.Text
+	MainContent       *fyne.Container
 }
 
 // createTranscriptArea creates the main transcript text area
@@ -125,109 +127,139 @@ func createStatusBar(waveform *WaveformVisualizer) (*fyne.Container, *canvas.Tex
 	return paddedStatusBar, statusLabel
 }
 
+// createStreamingPreviewArea creates the streaming preview area for real-time transcription updates
+func createStreamingPreviewArea() *widget.Entry {
+	// Create a multiline entry that is properly configured for streaming transcription preview
+	preview := widget.NewMultiLineEntry()
+
+	// Set proper wrapping
+	preview.Wrapping = fyne.TextWrapWord
+
+	// Use clear placeholder text with high contrast
+	preview.SetPlaceHolder("Live transcription will appear here...")
+
+	// Use styling for better visibility
+	preview.TextStyle = fyne.TextStyle{
+		Italic: true, // Indicate this is not final text
+	}
+
+	// Make the text slightly smaller than the main transcript
+	// The actual text size comes from the theme
+
+	// Set initial text
+	preview.SetText("Waiting for speech...")
+
+	// Make read-only but still allow selection
+	preview.DisableableWidget.Disable()
+
+	return preview
+}
+
+// createFinalizedSegmentsContainer creates a container to hold finalized transcription segments
+func createFinalizedSegmentsContainer() *fyne.Container {
+	// Create a vertical box container that will hold the finalized transcription "cards"
+	segmentsContainer := container.NewVBox()
+
+	// Wrap in a scroll container to handle many segments
+	scrollContainer := container.NewVScroll(segmentsContainer)
+
+	// Return the scroll container wrapped in a regular container to match the return type
+	return container.NewMax(scrollContainer)
+}
+
+// createTranscriptionSegmentCard creates an individual card for a finalized transcription segment
+func createTranscriptionSegmentCard(text string, onDelete func(), onSave func()) *fyne.Container {
+	// Create the text display with better styling
+	textLabel := widget.NewLabel(text)
+	textLabel.Wrapping = fyne.TextWrapWord
+	textLabel.TextStyle = fyne.TextStyle{
+		Bold: true, // Make text bold for better readability
+	}
+
+	// Create action buttons with clearer labels and larger size
+	deleteButton := widget.NewButtonWithIcon("Delete", theme.DeleteIcon(), onDelete)
+	deleteButton.Importance = widget.WarningImportance
+
+	saveButton := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), onSave)
+	saveButton.Importance = widget.HighImportance
+
+	// Create a horizontal container for buttons with better spacing
+	buttonContainer := container.NewHBox(
+		layout.NewSpacer(),
+		saveButton,
+		container.NewPadded(widget.NewSeparator()),
+		deleteButton,
+	)
+
+	// Create a card with a border and background that's more visually distinct
+	background := canvas.NewRectangle(color.NRGBA{R: 40, G: 50, B: 80, A: 255})
+
+	// Create a border for the card
+	border := canvas.NewRectangle(color.NRGBA{R: 60, G: 70, B: 100, A: 255})
+
+	// Create the content with padding
+	content := container.NewVBox(
+		container.NewPadded(textLabel),
+		widget.NewSeparator(), // Add a separator between text and buttons
+		buttonContainer,
+	)
+
+	paddedContent := container.NewPadded(content)
+
+	// Use a border layout to create a more distinct card effect
+	card := container.New(layout.NewMaxLayout(),
+		border,
+		container.NewPadded(background),
+		paddedContent,
+	)
+
+	return card
+}
+
 // createMainUI creates the main UI layout
 func createMainUI(
 	transcriptBox *widget.Entry,
+	streamingPreview *widget.Entry,
+	finalizedSegments *fyne.Container,
 	controlPanel *fyne.Container,
 	statusBar *fyne.Container,
 ) *fyne.Container {
-	// Create a deep blue background for the entire application
-	mainBg := canvas.NewRectangle(color.NRGBA{R: 8, G: 15, B: 35, A: 255})
 
-	// Compressed ASCII banner designed to fit in sidebar
-	bannerText := `
-██████╗  █████╗ ███╗   ███╗██████╗ ██╗     ███████╗
-██╔══██╗██╔══██╗████╗ ████║██╔══██╗██║     ██╔════╝
-██████╔╝███████║██╔████╔██║██████╔╝██║     █████╗
-██╔══██╗██╔══██║██║╚██╔╝██║██╔══██╗██║     ██╔══╝
-██║  ██║██║  ██║██║ ╚═╝ ██║██████╔╝███████╗███████╗
-`
-
-	// Important: Use a widget.Label instead of canvas.Text for proper ASCII art rendering
-	banner := widget.NewLabelWithStyle(bannerText, fyne.TextAlignCenter,
-		fyne.TextStyle{Monospace: true, Bold: true})
-
-	// Set wrapping off to preserve ASCII art formatting
-	banner.Wrapping = fyne.TextWrapOff
-
-	// Add a simple subtitle
-	subtitle := canvas.NewText("Speech-to-Text Service", color.White)
-	subtitle.TextStyle = fyne.TextStyle{Bold: true}
-	subtitle.TextSize = 12
-	subtitle.Alignment = fyne.TextAlignCenter
-
-	// Create a container for the banner with padding and distinctive background
-	bannerBox := container.NewVBox(
-		banner,
-		subtitle,
+	// Create a tabbed container to separate the different views
+	tabs := container.NewAppTabs(
+		container.NewTabItem("Two-Stage View",
+			container.NewBorder(
+				nil,
+				statusBar,
+				nil,
+				nil,
+				container.NewVSplit(
+					streamingPreview,
+					finalizedSegments,
+				),
+			),
+		),
+		container.NewTabItem("Classic View",
+			container.NewBorder(
+				nil,
+				statusBar,
+				nil,
+				nil,
+				transcriptBox,
+			),
+		),
 	)
 
-	// Create a fixed size container for the banner that fits properly
-	bannerContainer := container.NewStack(
-		canvas.NewRectangle(color.NRGBA{R: 15, G: 25, B: 60, A: 255}),
-		container.NewPadded(bannerBox),
+	// Create the main layout with control panel at the top
+	mainLayout := container.NewBorder(
+		controlPanel, // top
+		nil,          // bottom (status bar is in the tab content)
+		nil,          // left
+		nil,          // right
+		tabs,         // center content
 	)
 
-	// Make the banner container larger to ensure visibility
-	bannerContainer.Resize(fyne.NewSize(200, 130))
-
-	// Create a smaller, less prominent sidebar with standard button layout
-	paddedPanel := container.NewPadded(controlPanel)
-
-	// Use a border layout to create the sidebar with banner at top and buttons below
-	sidebar := container.NewBorder(
-		bannerContainer, // Banner at the top
-		nil, nil, nil,   // No elements for bottom/left/right
-		paddedPanel, // Control panel fills the rest
-	)
-
-	// Create a visually distinct sidebar background that's less prominent
-	sidebarBg := canvas.NewRectangle(color.NRGBA{R: 10, G: 18, B: 40, A: 255})
-	sidebarContainer := container.NewStack(
-		sidebarBg,
-		sidebar,
-	)
-
-	// Make the sidebar narrower to give more space to the transcript
-	sidebarContainer.Resize(fyne.NewSize(180, 800))
-
-	// Create a scroll container for the transcript
-	transcriptScroll := container.NewVScroll(transcriptBox)
-
-	// Create transcript container with border and better contrast
-	transcriptBorder := canvas.NewRectangle(color.NRGBA{R: 45, G: 85, B: 135, A: 255})
-	transcriptBackground := canvas.NewRectangle(color.NRGBA{R: 15, G: 35, B: 60, A: 255})
-
-	transcriptContainer := container.NewStack(
-		transcriptBorder,
-		container.NewPadded(transcriptBackground),
-		container.NewPadded(transcriptScroll),
-	)
-
-	// Create a container for the transcript area with the status bar at the bottom
-	rightSide := container.NewBorder(
-		nil,       // No top component
-		statusBar, // Status bar at bottom
-		nil, nil,  // No left/right components
-		transcriptContainer, // Transcript takes remaining space
-	)
-
-	// Create the main layout with horizontal split between sidebar and content
-	mainLayout := container.NewHSplit(
-		sidebarContainer, // Left sidebar (fixed width)
-		rightSide,        // Right side (transcript + status)
-	)
-
-	// Set the split position to give the sidebar only 15% of the width (smaller than before)
-	mainLayout.Offset = 0.15
-
-	// Create the final container with background
-	finalContainer := container.NewStack(
-		mainBg,
-		mainLayout,
-	)
-
-	return finalContainer
+	return mainLayout
 }
 
 // CreateUI creates all UI components and returns them in a struct
@@ -240,6 +272,12 @@ func CreateUI(
 ) UIComponents {
 	// Create transcript area using the helper function
 	transcriptBox := createTranscriptArea()
+
+	// Create streaming preview area
+	streamingPreview := createStreamingPreviewArea()
+
+	// Create finalized segments container
+	finalizedSegments := createFinalizedSegmentsContainer()
 
 	// Create control panel using the helper function
 	controlPanel, listenButton, clearButton, copyButton, insertButton := createControlPanel(
@@ -255,17 +293,21 @@ func CreateUI(
 	// Create main UI layout using the helper function
 	mainContent := createMainUI(
 		transcriptBox,
+		streamingPreview,
+		finalizedSegments,
 		controlPanel,
 		statusBar,
 	)
 
 	return UIComponents{
-		TranscriptBox: transcriptBox,
-		ListenButton:  listenButton,
-		ClearButton:   clearButton,
-		CopyButton:    copyButton,
-		InsertButton:  insertButton,
-		StatusLabel:   statusLabel,
-		MainContent:   mainContent,
+		TranscriptBox:     transcriptBox,
+		StreamingPreview:  streamingPreview,
+		FinalizedSegments: finalizedSegments,
+		ListenButton:      listenButton,
+		ClearButton:       clearButton,
+		CopyButton:        copyButton,
+		InsertButton:      insertButton,
+		StatusLabel:       statusLabel,
+		MainContent:       mainContent,
 	}
 }

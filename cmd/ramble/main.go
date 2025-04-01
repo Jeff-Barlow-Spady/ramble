@@ -78,8 +78,14 @@ func New(debug bool) (*App, error) {
 		// Normalize text before displaying
 		normalizedText := transcription.NormalizeTranscriptionText(text)
 		if normalizedText != "" {
-			app.ui.AppendTranscript(normalizedText)
+			// Use the new session accumulation method to build session text
+			app.ui.AppendSessionText(normalizedText)
+
+			// Store the text for later
 			app.appendToFullText(normalizedText)
+
+			// The finalization only happens when recording stops, not on a timer
+			// So we don't need to reset a timer here
 		}
 	})
 
@@ -98,7 +104,10 @@ func (a *App) startRecording() {
 	a.mu.Lock()
 	a.fullText = ""
 	a.mu.Unlock()
+
+	// Clear the UI for the new recording session
 	a.ui.UpdateTranscript("")
+	a.ui.UpdateStreamingPreview("")
 
 	// Start the transcriber
 	a.transcriber.SetRecordingState(true)
@@ -140,6 +149,9 @@ func (a *App) stopRecording() {
 	if a.transcriber != nil {
 		a.transcriber.SetRecordingState(false)
 	}
+
+	// Finalize current session
+	a.ui.FinalizeTranscriptionSegment()
 
 	a.ui.SetState(ui.StateIdle)
 }
