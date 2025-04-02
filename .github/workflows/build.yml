@@ -63,6 +63,7 @@ jobs:
         submodules: 'false' # Don't use recursive checkout as it's causing issues
 
     - name: Checkout whisper.cpp Submodule
+      shell: bash
       run: |
         # Make sure the directory exists
         mkdir -p third_party
@@ -222,7 +223,15 @@ jobs:
         go-version: ${{ env.GO_VERSION }}
 
     - name: Install Build Dependencies
-      run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential
+        # Dependencies for X11 and UI libraries
+        sudo apt-get install -y libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+        # Dependencies for audio libraries
+        sudo apt-get install -y portaudio19-dev libasound2-dev
+        # Dependencies for GL
+        sudo apt-get install -y libgl1-mesa-dev xorg-dev
 
     - name: Build whisper.cpp
       working-directory: ./third_party/whisper.cpp
