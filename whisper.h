@@ -1,1 +1,1 @@
-/home/toasty/projects/Ramble/whisper.cpp/include/whisper.h
+third_party/whisper.cpp/include/whisper.h
