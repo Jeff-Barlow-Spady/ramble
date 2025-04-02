@@ -173,17 +173,31 @@ jobs:
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
-      # No submodules needed if unit tests don't touch C++ parts
+      with:
+        submodules: 'recursive' # Ensure whisper.cpp submodule is checked out
 
     - name: Set up Go
       uses: actions/setup-go@v5 # Use v5 for setup-go
       with:
         go-version: ${{ env.GO_VERSION }}
 
+    - name: Install Build Dependencies
+      run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+
+    - name: Build whisper.cpp
+      working-directory: ./third_party/whisper.cpp
+      run: |
+        mkdir -p build
+        cd build
+        cmake -DWHISPER_BUILD_GO_BINDINGS=1 -DWHISPER_BUILD_SHARED=1 ..
+        cmake --build . --parallel
+
     - name: Run Go Unit Tests
-      # Run tests without any special tags, assuming unit tests are untagged
-      # Add flags like -race if needed: go test -race ./...
-      run: go test -v ./...
+      env:
+        CGO_ENABLED: 1
+        CGO_CFLAGS: "-I$(pwd)/third_party/whisper.cpp/include"
+        CGO_LDFLAGS: "-L$(pwd)/third_party/whisper.cpp/build/src -lwhisper"
+      run: go test -v -tags=whisper_go ./...
 
   integration-test:
     needs: build-whisper-library
