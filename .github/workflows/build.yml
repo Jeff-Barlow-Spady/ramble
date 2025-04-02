@@ -60,17 +60,16 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        submodules: 'false' # Don't use automatic submodule checkout
+        submodules: 'false' # Don't use recursive checkout as it's causing issues
 
-    - name: Manual Submodule Checkout
-      shell: bash
+    - name: Checkout whisper.cpp Submodule
       run: |
-        git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | while read path_key path; do
-          url_key=$(echo $path_key | sed 's/\.path/.url/')
-          url=$(git config -f .gitmodules --get "$url_key")
-          git submodule add --force "$url" "$path"
-        done
-        git submodule update --init --recursive
+        # Make sure the directory exists
+        mkdir -p third_party
+        # Remove any existing files if they exist
+        rm -rf third_party/whisper.cpp
+        # Directly clone the repo instead of using submodules
+        git clone https://github.com/ggerganov/whisper.cpp.git third_party/whisper.cpp
 
     - name: Verify Submodule Structure
       shell: bash
@@ -191,17 +190,16 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        submodules: 'false' # Don't use automatic submodule checkout
+        submodules: 'false' # Don't use recursive checkout as it's causing issues
 
-    - name: Manual Submodule Checkout
-      shell: bash
+    - name: Checkout whisper.cpp Submodule
       run: |
-        git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | while read path_key path; do
-          url_key=$(echo $path_key | sed 's/\.path/.url/')
-          url=$(git config -f .gitmodules --get "$url_key")
-          git submodule add --force "$url" "$path"
-        done
-        git submodule update --init --recursive
+        # Make sure the directory exists
+        mkdir -p third_party
+        # Remove any existing files if they exist
+        rm -rf third_party/whisper.cpp
+        # Directly clone the repo instead of using submodules
+        git clone https://github.com/ggerganov/whisper.cpp.git third_party/whisper.cpp
 
     - name: Verify Submodule Structure
       shell: bash
@@ -273,17 +271,16 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        submodules: 'false' # Don't use automatic submodule checkout
+        submodules: 'false' # Don't use recursive checkout as it's causing issues
 
-    - name: Manual Submodule Checkout
-      shell: bash
+    - name: Checkout whisper.cpp Submodule
       run: |
-        git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | while read path_key path; do
-          url_key=$(echo $path_key | sed 's/\.path/.url/')
-          url=$(git config -f .gitmodules --get "$url_key")
-          git submodule add --force "$url" "$path"
-        done
-        git submodule update --init --recursive
+        # Make sure the directory exists
+        mkdir -p third_party
+        # Remove any existing files if they exist
+        rm -rf third_party/whisper.cpp
+        # Directly clone the repo instead of using submodules
+        git clone https://github.com/ggerganov/whisper.cpp.git third_party/whisper.cpp
 
     - name: Verify Submodule Structure
       shell: bash
@@ -386,17 +383,16 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        submodules: 'false' # Don't use automatic submodule checkout
+        submodules: 'false' # Don't use recursive checkout as it's causing issues
 
-    - name: Manual Submodule Checkout
-      shell: bash
+    - name: Checkout whisper.cpp Submodule
       run: |
-        git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | while read path_key path; do
-          url_key=$(echo $path_key | sed 's/\.path/.url/')
-          url=$(git config -f .gitmodules --get "$url_key")
-          git submodule add --force "$url" "$path"
-        done
-        git submodule update --init --recursive
+        # Make sure the directory exists
+        mkdir -p third_party
+        # Remove any existing files if they exist
+        rm -rf third_party/whisper.cpp
+        # Directly clone the repo instead of using submodules
+        git clone https://github.com/ggerganov/whisper.cpp.git third_party/whisper.cpp
 
     - name: Verify Submodule Structure
       shell: bash
