@@ -47,7 +47,7 @@ user_config.json
 # Temporary files
 /tmp/
 *.tmp
-
+ramble
 # Build and packaging artifacts
 /ramble
 /ramble.exe
