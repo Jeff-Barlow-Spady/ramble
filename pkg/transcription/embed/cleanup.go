@@ -1,3 +1,6 @@
+//go:build !whisper_go
+// +build !whisper_go
+
 package embed
 
 import (
