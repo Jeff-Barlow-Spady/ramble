@@ -108,7 +108,7 @@ jobs:
         mkdir -p artifact/${{ matrix.artifact_lib_dir }}
 
     - name: Copy Headers
-      run: cp -r third_party/whisper.cpp/whisper.h artifact/${{ matrix.artifact_include_dir }}/
+      run: cp -r third_party/whisper.cpp/include/whisper.h artifact/${{ matrix.artifact_include_dir }}/
 
     - name: Copy Library (Linux/macOS)
       if: runner.os != 'Windows'
