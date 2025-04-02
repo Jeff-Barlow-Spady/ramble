@@ -60,7 +60,17 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        submodules: 'recursive' # Ensure whisper.cpp submodule is checked out
+        submodules: 'false' # Don't use automatic submodule checkout
+
+    - name: Manual Submodule Checkout
+      shell: bash
+      run: |
+        git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | while read path_key path; do
+          url_key=$(echo $path_key | sed 's/\.path/.url/')
+          url=$(git config -f .gitmodules --get "$url_key")
+          git submodule add --force "$url" "$path"
+        done
+        git submodule update --init --recursive
 
     - name: Verify Submodule Structure
       shell: bash
@@ -181,7 +191,17 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        submodules: 'recursive' # Ensure whisper.cpp submodule is checked out
+        submodules: 'false' # Don't use automatic submodule checkout
+
+    - name: Manual Submodule Checkout
+      shell: bash
+      run: |
+        git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | while read path_key path; do
+          url_key=$(echo $path_key | sed 's/\.path/.url/')
+          url=$(git config -f .gitmodules --get "$url_key")
+          git submodule add --force "$url" "$path"
+        done
+        git submodule update --init --recursive
 
     - name: Verify Submodule Structure
       shell: bash
@@ -253,7 +273,17 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        submodules: 'recursive' # Ensure whisper.cpp submodule is checked out for Go bindings
+        submodules: 'false' # Don't use automatic submodule checkout
+
+    - name: Manual Submodule Checkout
+      shell: bash
+      run: |
+        git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | while read path_key path; do
+          url_key=$(echo $path_key | sed 's/\.path/.url/')
+          url=$(git config -f .gitmodules --get "$url_key")
+          git submodule add --force "$url" "$path"
+        done
+        git submodule update --init --recursive
 
     - name: Verify Submodule Structure
       shell: bash
@@ -356,7 +386,17 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        submodules: 'recursive' # Ensure whisper.cpp submodule is checked out for Go bindings
+        submodules: 'false' # Don't use automatic submodule checkout
+
+    - name: Manual Submodule Checkout
+      shell: bash
+      run: |
+        git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | while read path_key path; do
+          url_key=$(echo $path_key | sed 's/\.path/.url/')
+          url=$(git config -f .gitmodules --get "$url_key")
+          git submodule add --force "$url" "$path"
+        done
+        git submodule update --init --recursive
 
     - name: Verify Submodule Structure
       shell: bash
