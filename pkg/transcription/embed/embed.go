@@ -12,10 +12,22 @@ import (
 // ErrAssetsNotEmbedded indicates embedded assets are not available
 var ErrAssetsNotEmbedded = errors.New("embedded assets not available")
 
-// Use a simpler embed directive that just requires directories to exist
+// Models embeds the model files.
 //
-//go:embed binaries/linux-amd64/whisper models/tiny.bin models/small.bin
-var Assets embed.FS
+//go:embed models/*
+var Models embed.FS
+
+// Binaries embeds the platform-specific whisper binary files.
+// Ensure the paths match the directory structure created in the CI/CD pipeline.
+// For CGO builds using the library, this might not be strictly necessary
+// if the library is linked dynamically or statically during the Go build process.
+// This specific embed seems to be causing issues in unit tests as the file doesn't exist there.
+// Consider removing if you are using CGO linking instead of embedding the executable.
+//
+//go:embed binaries/linux-amd64/whisper
+//go:embed binaries/windows-amd64/whisper.exe
+//go:embed binaries/darwin-amd64/whisper
+var Binaries embed.FS
 
 // Note on embedding full models for CI/CD and distribution:
 //
@@ -68,13 +80,13 @@ func HasEmbeddedAssets() bool {
 	}
 
 	// Try to read the whisper binary file
-	_, err := Assets.ReadFile(binaryPath)
+	_, err := Binaries.ReadFile(binaryPath)
 	if err != nil {
 		return false
 	}
 
 	// Try to read the model file (small.bin)
-	_, err = Assets.ReadFile(filepath.Join("models", "small.bin"))
+	_, err = Models.ReadFile(filepath.Join("models", "small.bin"))
 	if err != nil {
 		return false
 	}
@@ -99,7 +111,7 @@ func ExtractModel(modelSize string) (string, error) {
 	}
 
 	modelPath := filepath.Join("models", modelSize+".bin")
-	modelData, err := Assets.ReadFile(modelPath)
+	modelData, err := Models.ReadFile(modelPath)
 	if err != nil {
 		return "", err
 	}
@@ -170,7 +182,7 @@ func GetWhisperExecutable() (string, error) {
 	}
 
 	// Extract binary
-	binaryData, err := Assets.ReadFile(binaryPath)
+	binaryData, err := Binaries.ReadFile(binaryPath)
 	if err != nil {
 		return "", err
 	}
