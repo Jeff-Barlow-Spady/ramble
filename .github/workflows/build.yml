@@ -57,12 +57,13 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - name: Checkout Repository with Submodules
+    - name: Checkout Repository
       uses: actions/checkout@v4
       with:
         submodules: 'recursive' # Ensure whisper.cpp submodule is checked out
 
     - name: Verify Submodule Structure
+      shell: bash
       run: |
         if [ ! -d "third_party/whisper.cpp" ]; then
           echo "Error: third_party/whisper.cpp directory not found. Checking .gitmodules file:"
@@ -183,6 +184,7 @@ jobs:
         submodules: 'recursive' # Ensure whisper.cpp submodule is checked out
 
     - name: Verify Submodule Structure
+      shell: bash
       run: |
         if [ ! -d "third_party/whisper.cpp" ]; then
           echo "Error: third_party/whisper.cpp directory not found. Checking .gitmodules file:"
