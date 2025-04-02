@@ -136,27 +136,19 @@ jobs:
       shell: pwsh # Use PowerShell for better cross-platform scripting if needed, or stick to cmd
       run: |
         $LibName = "${{ matrix.artifact_lib_name }}"
-        $DestDir = "artifact/${{ matrix.artifact_lib_dir }}"
-        $SourceLocations = @(
-          "third_party/whisper.cpp/build/src/Release/$LibName", # Common for VS CMake
-          "third_party/whisper.cpp/build/src/$LibName",
-          "third_party/whisper.cpp/build/Release/$LibName",     # Common for VS CMake
-          "third_party/whisper.cpp/build/lib/Release/$LibName", # Common for VS CMake
-          "third_party/whisper.cpp/build/lib/$LibName",
-          "third_party/whisper.cpp/build/$LibName"
-        )
-        $Found = $false
-        foreach ($Location in $SourceLocations) {
-          if (Test-Path $Location) {
-            Write-Host "Found library at $Location"
-            Copy-Item $Location $DestDir
-            $Found = $true
-            break
-          }
-        }
-        if (-not $Found) {
+        $SourceDir = "${{ github.workspace }}/third_party/whisper.cpp/build/src"
+        $ReleaseSourceDir = "${{ github.workspace }}/third_party/whisper.cpp/build/src/Release" # Common location for MSVC builds
+        $TargetDir = "${{ github.workspace }}/artifact/${{ matrix.artifact_lib_dir }}"
+        New-Item -ItemType Directory -Force -Path $TargetDir
+        if (Test-Path "$SourceDir/$LibName") {
+          Copy-Item "$SourceDir/$LibName" -Destination $TargetDir
+          echo "Copied library from $SourceDir"
+        } elseif (Test-Path "$ReleaseSourceDir/$LibName") {
+          Copy-Item "$ReleaseSourceDir/$LibName" -Destination $TargetDir
+          echo "Copied library from $ReleaseSourceDir"
+        } else {
           Write-Host "Library file $LibName not found in common locations:"
-          $SourceLocations | ForEach-Object { Write-Host "- $_" }
+          $SourceDir, $ReleaseSourceDir | ForEach-Object { Write-Host "- $_" }
           # List contents for debugging
           Get-ChildItem -Recurse third_party/whisper.cpp/build | Select-Object FullName
           exit 1
