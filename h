@@ -1,0 +1,5 @@
+[33m6b181aa[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m Fix embed package to support whisper_go build tag
+[33m2158bb9[m[33m ([m[1;31morigin/main[m[33m)[m Update build constraints in embed files to exclude whisper_go build tag. This change applies to embed.go, embed_test.go, and cleanup.go, ensuring compatibility with the current project structure.
+[33mccd61a2[m[33m ([m[1;33mtag: [m[1;33mv0.1.1-whisper-go[m[33m)[m Test: Verify CI on correct repo after redirect fix
+[33me42ce4c[m Enhance CI build workflow and asset embedding. Update library copying logic for Linux and Windows to check multiple common locations for static libraries. Refactor Go embed directives to separate model and binary assets, improving compatibility and debugging. Adjust file reading methods to utilize the new embed structure, ensuring proper asset availability during runtime.
+[33m5507767[m[33m ([m[1;33mtag: [m[1;33mv0.1.0-test-cli[m[33m)[m Test: Trigger CI workflow via CLI push
