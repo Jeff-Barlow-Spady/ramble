@@ -15,38 +15,42 @@ env:
   MODEL_TINY_URL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
   MODEL_SMALL_NAME: "ggml-small.bin"
   MODEL_TINY_NAME: "ggml-tiny.bin"
-  # Define Go version centrally - align with go.mod
-  GO_VERSION: '1.23' # Update to match go.mod
+  # Define Go version centrally
+  GO_VERSION: '1.21' # Keep consistent with original build job
 
 jobs:
   build-whisper-library:
     strategy:
       fail-fast: false # Allow other platforms to continue if one fails
       matrix:
-        os: [ubuntu-latest, macos-latest] # Temporarily remove windows until build is fixed
         include:
           - os: ubuntu-latest
-            os_name: linux
-            arch: amd64
+            platform: linux-amd64
             c_compiler: gcc
             cxx_compiler: g++
             artifact_lib_name: libwhisper.a
             artifact_include_dir: include
             artifact_lib_dir: lib
-          - os: macos-latest
-            os_name: darwin
-            arch: amd64
+          - os: windows-latest
+            platform: windows-amd64
+            c_compiler: cl.exe # MSVC compiler
+            cxx_compiler: cl.exe
+            artifact_lib_name: whisper.lib # Static lib name for MSVC
+            artifact_include_dir: include
+            artifact_lib_dir: lib
+          - os: macos-latest # Use latest for potential arm64 later
+            platform: darwin-amd64
             c_compiler: clang
             cxx_compiler: clang++
             artifact_lib_name: libwhisper.a
             artifact_include_dir: include
             artifact_lib_dir: lib
-          # - os: windows-latest
-          #   os_name: windows
-          #   arch: amd64
-          #   c_compiler: cl.exe
-          #   cxx_compiler: cl.exe
-          #   artifact_lib_name: whisper.lib
+          # Add arm64 for macOS later if needed
+          # - os: macos-latest
+          #   platform: darwin-arm64
+          #   c_compiler: clang
+          #   cxx_compiler: clang++
+          #   artifact_lib_name: libwhisper.a
           #   artifact_include_dir: include
           #   artifact_lib_dir: lib
 
@@ -96,8 +100,7 @@ jobs:
 
     - name: Build whisper library
       working-directory: ./third_party/whisper.cpp
-      # Use -j to speed up builds on multi-core runners
-      run: cmake --build build --config Release --target whisper -j
+      run: cmake --build build --config Release --target whisper # Target the library itself
 
     - name: Prepare Artifact Directory
       run: |
@@ -105,10 +108,7 @@ jobs:
         mkdir -p artifact/${{ matrix.artifact_lib_dir }}
 
     - name: Copy Headers
-      run: |
-        cp third_party/whisper.cpp/whisper.h artifact/${{ matrix.artifact_include_dir }}/
-        # Copy ggml.h directly into the main include directory
-        cp third_party/whisper.cpp/ggml/include/ggml.h artifact/${{ matrix.artifact_include_dir }}/
+      run: cp -r third_party/whisper.cpp/include/whisper.h artifact/${{ matrix.artifact_include_dir }}/
 
     - name: Copy Library (Linux/macOS)
       if: runner.os != 'Windows'
@@ -157,47 +157,39 @@ jobs:
     - name: Upload whisper library artifact
       uses: actions/upload-artifact@v4
       with:
-        name: whisper-lib-${{ matrix.os_name }}-${{ matrix.arch }}
-        path: artifact/
+        name: whisper-lib-${{ matrix.platform }}
+        path: artifact/ # Upload the whole artifact dir (includes include/ and lib/)
 
   unit-test:
-    needs: build-whisper-library
-    runs-on: ubuntu-latest # Assuming unit tests run on Linux for now
+    runs-on: ubuntu-latest # Unit tests usually don't need platform specifics
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
+      with:
+        submodules: 'recursive' # Ensure whisper.cpp submodule is checked out
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v5 # Use v5 for setup-go
       with:
-        # Use the centrally defined Go version
         go-version: ${{ env.GO_VERSION }}
 
-    - name: Install Build Dependencies (Linux)
-      if: runner.os == 'Linux'
+    - name: Install Build Dependencies
+      run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+
+    - name: Build whisper.cpp
+      working-directory: ./third_party/whisper.cpp
       run: |
-        sudo apt-get update
-        sudo apt-get install -y libx11-dev libayatana-appindicator3-dev
-
-    - name: Download whisper library artifact (Linux)
-      if: runner.os == 'Linux'
-      uses: actions/download-artifact@v4
-      with:
-        name: whisper-lib-linux-amd64
-        path: ./whisper-artifact
-
-    # Add steps for downloading other OS artifacts if tests run on them
-
-    - name: List downloaded files # Debug step
-      run: ls -R ./whisper-artifact
+        mkdir -p build
+        cd build
+        cmake -DWHISPER_BUILD_GO_BINDINGS=1 -DWHISPER_BUILD_SHARED=1 ..
+        cmake --build . --parallel
 
     - name: Run Go Unit Tests
       env:
-        # CGO_CPPFLAGS now correctly points to the directory containing both whisper.h and ggml.h
-        CGO_CPPFLAGS: "-I${{ github.workspace }}/whisper-artifact/include"
-        CGO_LDFLAGS: "-L${{ github.workspace }}/whisper-artifact/lib -lwhisper -lm -ldl -pthread"
-        LD_LIBRARY_PATH: "${{ github.workspace }}/whisper-artifact/lib:${LD_LIBRARY_PATH}"
-      run: go test -v ./...
+        CGO_ENABLED: 1
+        CGO_CFLAGS: "-I$(pwd)/third_party/whisper.cpp/include"
+        CGO_LDFLAGS: "-L$(pwd)/third_party/whisper.cpp/build/src -lwhisper"
+      run: go test -v -tags=whisper_go ./...
 
   integration-test:
     needs: build-whisper-library
@@ -236,7 +228,6 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        # Uses env.GO_VERSION by default - already correct
         go-version: ${{ env.GO_VERSION }}
 
     - name: Download whisper library artifact
@@ -325,7 +316,6 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        # Uses env.GO_VERSION by default - already correct
         go-version: ${{ env.GO_VERSION }}
 
     - name: Download whisper library artifact
