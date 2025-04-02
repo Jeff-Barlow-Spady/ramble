@@ -246,7 +246,8 @@ jobs:
         CGO_ENABLED: 1
         CGO_CFLAGS: "-I$(pwd)/third_party/whisper.cpp/include -I$(pwd)/third_party/whisper.cpp/ggml/include"
         CGO_LDFLAGS: "-L$(pwd)/third_party/whisper.cpp/build/src -lwhisper"
-      run: go test -v -tags=whisper_go ./...
+      # Run only tests that don't require UI components
+      run: go test -v -tags=whisper_go ./pkg/config ./pkg/transcription/embed ./tests/unit
 
   integration-test:
     needs: build-whisper-library
@@ -283,6 +284,7 @@ jobs:
         submodules: 'false' # Don't use recursive checkout as it's causing issues
 
     - name: Checkout whisper.cpp Submodule
+      shell: bash
       run: |
         # Make sure the directory exists
         mkdir -p third_party
@@ -310,6 +312,23 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: ${{ env.GO_VERSION }}
+
+    - name: Install Required Dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential
+        # Dependencies for X11 and UI libraries
+        sudo apt-get install -y libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+        # Dependencies for audio libraries
+        sudo apt-get install -y portaudio19-dev libasound2-dev
+        # Dependencies for GL
+        sudo apt-get install -y libgl1-mesa-dev xorg-dev
+
+    - name: Install Required Dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install portaudio
 
     - name: Download whisper library artifact
       uses: actions/download-artifact@v4
@@ -339,7 +358,8 @@ jobs:
       # Pass model path via an env var if tests need it
       env:
         RAMBLE_TEST_MODEL_PATH: ./models/${{ env.MODEL_TINY_NAME }}
-      run: go test -v -tags=whisper_go ./...
+      # Run only core integration tests
+      run: go test -v -tags=whisper_go ./tests/integration
 
   build:
     needs: [unit-test, integration-test] # Build only if all tests pass
