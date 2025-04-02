@@ -111,18 +111,61 @@ jobs:
 
     - name: Copy Library (Linux/macOS)
       if: runner.os != 'Windows'
-      run: cp third_party/whisper.cpp/build/src/${{ matrix.artifact_lib_name }} artifact/${{ matrix.artifact_lib_dir }}/
+      shell: bash
+      run: |
+        # Check common locations for the static library
+        if [[ -f "third_party/whisper.cpp/build/src/${{ matrix.artifact_lib_name }}" ]]; then
+          cp "third_party/whisper.cpp/build/src/${{ matrix.artifact_lib_name }}" "artifact/${{ matrix.artifact_lib_dir }}/"
+          echo "Copied library from build/src/"
+        elif [[ -f "third_party/whisper.cpp/build/lib/${{ matrix.artifact_lib_name }}" ]]; then
+          cp "third_party/whisper.cpp/build/lib/${{ matrix.artifact_lib_name }}" "artifact/${{ matrix.artifact_lib_dir }}/"
+          echo "Copied library from build/lib/"
+        elif [[ -f "third_party/whisper.cpp/build/${{ matrix.artifact_lib_name }}" ]]; then
+          cp "third_party/whisper.cpp/build/${{ matrix.artifact_lib_name }}" "artifact/${{ matrix.artifact_lib_dir }}/"
+          echo "Copied library from build/"
+        else
+          echo "Library file ${{ matrix.artifact_lib_name }} not found in common locations (build/src/, build/lib/, build/)"
+          # List contents for debugging
+          ls -R third_party/whisper.cpp/build
+          exit 1
+        fi
 
     - name: Copy Library (Windows)
       if: runner.os == 'Windows'
-      # MSVC puts static libs in a subdirectory based on config
-      run: cp third_party/whisper.cpp/build/src/Release/${{ matrix.artifact_lib_name }} artifact/${{ matrix.artifact_lib_dir }}/
+      shell: pwsh # Use PowerShell for better cross-platform scripting if needed, or stick to cmd
+      run: |
+        $LibName = "${{ matrix.artifact_lib_name }}"
+        $DestDir = "artifact/${{ matrix.artifact_lib_dir }}"
+        $SourceLocations = @(
+          "third_party/whisper.cpp/build/src/Release/$LibName", # Common for VS CMake
+          "third_party/whisper.cpp/build/src/$LibName",
+          "third_party/whisper.cpp/build/Release/$LibName",     # Common for VS CMake
+          "third_party/whisper.cpp/build/lib/Release/$LibName", # Common for VS CMake
+          "third_party/whisper.cpp/build/lib/$LibName",
+          "third_party/whisper.cpp/build/$LibName"
+        )
+        $Found = $false
+        foreach ($Location in $SourceLocations) {
+          if (Test-Path $Location) {
+            Write-Host "Found library at $Location"
+            Copy-Item $Location $DestDir
+            $Found = $true
+            break
+          }
+        }
+        if (-not $Found) {
+          Write-Host "Library file $LibName not found in common locations:"
+          $SourceLocations | ForEach-Object { Write-Host "- $_" }
+          # List contents for debugging
+          Get-ChildItem -Recurse third_party/whisper.cpp/build | Select-Object FullName
+          exit 1
+        }
 
     - name: Upload whisper library artifact
       uses: actions/upload-artifact@v4
       with:
         name: whisper-lib-${{ matrix.platform }}
-        path: artifact/
+        path: artifact/ # Upload the whole artifact dir (includes include/ and lib/)
 
   unit-test:
     runs-on: ubuntu-latest # Unit tests usually don't need platform specifics
