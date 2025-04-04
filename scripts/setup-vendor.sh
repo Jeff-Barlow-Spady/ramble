@@ -7,7 +7,7 @@ echo "=== Setting up vendor directory for Ramble ==="
 mkdir -p vendor/whisper/include
 mkdir -p vendor/whisper/lib
 
-# Copy the header file
+# Copy the whisper headers
 if [ -f "whisper.h" ]; then
   echo "Copying whisper.h..."
   cp -v whisper.h vendor/whisper/include/
@@ -18,6 +18,19 @@ else
   if [ -n "$WHISPER_H" ]; then
     echo "Found whisper.h at $WHISPER_H"
     cp -v "$WHISPER_H" vendor/whisper/include/
+
+    # Find the GGML include directory (it's in the same location as whisper.h but under ggml/include)
+    WHISPER_DIR=$(dirname "$WHISPER_H")
+    GGML_INCLUDE_DIR=$(find $(dirname "$WHISPER_DIR") -name "include" -path "*/ggml/include" | head -n1)
+
+    if [ -n "$GGML_INCLUDE_DIR" ]; then
+      echo "Found GGML headers at $GGML_INCLUDE_DIR"
+      # Copy all GGML headers
+      cp -v "$GGML_INCLUDE_DIR"/*.h vendor/whisper/include/
+    else
+      echo "Error: Could not find GGML include directory"
+      exit 1
+    fi
   else
     echo "Error: Could not find whisper.h"
     exit 1

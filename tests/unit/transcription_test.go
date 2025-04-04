@@ -1,3 +1,6 @@
+//go:build cgo && whisper_go
+// +build cgo,whisper_go
+
 package unit
 
 import (
