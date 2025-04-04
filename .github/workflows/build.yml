@@ -29,7 +29,7 @@ jobs:
         push: false
         outputs: type=local,dest=./dist
         build-args: |
-          GO_VERSION=1.21
+          GO_VERSION=1.23
         build-contexts: |
           whisper-builder=docker-image://debian:bookworm-slim
         # Create the Dockerfile inline for the build
