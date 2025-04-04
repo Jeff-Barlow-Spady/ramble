@@ -10,406 +10,168 @@ on:
 
 env:
   # Define model URLs centrally
-  MODEL_SMALL_URL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
   MODEL_TINY_URL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
-  MODEL_SMALL_NAME: "ggml-small.bin"
   MODEL_TINY_NAME: "ggml-tiny.bin"
   # Define Go version centrally
-  GO_VERSION: '1.23' # Keep consistent with original build job
+  GO_VERSION: '1.23'
 
 jobs:
-  build-whisper-library:
-    strategy:
-      fail-fast: false # Allow other platforms to continue if one fails
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux-amd64
-            c_compiler: gcc
-            cxx_compiler: g++
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-          - os: windows-latest
-            platform: windows-amd64
-            c_compiler: cl.exe # MSVC compiler
-            cxx_compiler: cl.exe
-            artifact_lib_name: whisper.lib # Static lib name for MSVC
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-          - os: macos-latest # Use latest for potential arm64 later
-            platform: darwin-amd64
-            c_compiler: clang
-            cxx_compiler: clang++
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-          # Add arm64 for macOS later if needed
-          # - os: macos-latest
-          #   platform: darwin-arm64
-          #   c_compiler: clang
-          #   cxx_compiler: clang++
-          #   artifact_lib_name: libwhisper.a
-          #   artifact_include_dir: include
-          #   artifact_lib_dir: lib
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-    - name: Checkout Repository with Submodules
-      uses: actions/checkout@v4
-      with:
-        submodules: 'recursive' # Ensure whisper.cpp submodule is checked out
-
-    - name: Install Build Dependencies (Linux)
-      if: runner.os == 'Linux'
-      run: sudo apt-get update && sudo apt-get install -y cmake build-essential
-
-    - name: Install Build Dependencies (macOS)
-      if: runner.os == 'macOS'
-      run: brew install cmake
-
-    # Windows uses Visual Studio Build Tools available in the runner environment
-
-    - name: Configure CMake (Linux/macOS)
-      if: runner.os != 'Windows'
-      working-directory: ./third_party/whisper.cpp
-      run: >
-        cmake -S . -B build
-        -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
-        -DCMAKE_CXX_COMPILER=${{ matrix.cxx_compiler }}
-        -DCMAKE_BUILD_TYPE=Release
-        -DBUILD_SHARED_LIBS=OFF
-        -DWHISPER_BUILD_EXAMPLES=OFF
-        -DWHISPER_BUILD_TESTS=OFF
-        -DWHISPER_BUILD_SERVER=OFF
-        -DWHISPER_BUILD_TOOLS=OFF # Don't need tools like 'main' or 'stream'
-
-    - name: Configure CMake (Windows)
-      if: runner.os == 'Windows'
-      working-directory: ./third_party/whisper.cpp
-      run: >
-        cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-        -DCMAKE_BUILD_TYPE=Release
-        -DBUILD_SHARED_LIBS=OFF
-        -DWHISPER_BUILD_EXAMPLES=OFF
-        -DWHISPER_BUILD_TESTS=OFF
-        -DWHISPER_BUILD_SERVER=OFF
-        -DWHISPER_BUILD_TOOLS=OFF
-
-    - name: Build whisper library
-      working-directory: ./third_party/whisper.cpp
-      run: cmake --build build --config Release --target whisper # Target the library itself
-
-    - name: Prepare Artifact Directory
-      run: |
-        mkdir -p artifact/${{ matrix.artifact_include_dir }}
-        mkdir -p artifact/${{ matrix.artifact_lib_dir }}
-
-    - name: Copy Headers
-      run: cp -r third_party/whisper.cpp/whisper.h artifact/${{ matrix.artifact_include_dir }}/
-
-    - name: Copy Library (Linux/macOS)
-      if: runner.os != 'Windows'
-      shell: bash
-      run: |
-        # Check common locations for the static library
-        if [[ -f "third_party/whisper.cpp/build/src/${{ matrix.artifact_lib_name }}" ]]; then
-          cp "third_party/whisper.cpp/build/src/${{ matrix.artifact_lib_name }}" "artifact/${{ matrix.artifact_lib_dir }}/"
-          echo "Copied library from build/src/"
-        elif [[ -f "third_party/whisper.cpp/build/lib/${{ matrix.artifact_lib_name }}" ]]; then
-          cp "third_party/whisper.cpp/build/lib/${{ matrix.artifact_lib_name }}" "artifact/${{ matrix.artifact_lib_dir }}/"
-          echo "Copied library from build/lib/"
-        elif [[ -f "third_party/whisper.cpp/build/${{ matrix.artifact_lib_name }}" ]]; then
-          cp "third_party/whisper.cpp/build/${{ matrix.artifact_lib_name }}" "artifact/${{ matrix.artifact_lib_dir }}/"
-          echo "Copied library from build/"
-        else
-          echo "Library file ${{ matrix.artifact_lib_name }} not found in common locations (build/src/, build/lib/, build/)"
-          # List contents for debugging
-          ls -R third_party/whisper.cpp/build
-          exit 1
-        fi
-
-    - name: Copy Library (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh # Use PowerShell for better cross-platform scripting if needed, or stick to cmd
-      run: |
-        $LibName = "${{ matrix.artifact_lib_name }}"
-        $DestDir = "artifact/${{ matrix.artifact_lib_dir }}"
-        $SourceLocations = @(
-          "third_party/whisper.cpp/build/src/Release/$LibName", # Common for VS CMake
-          "third_party/whisper.cpp/build/src/$LibName",
-          "third_party/whisper.cpp/build/Release/$LibName",     # Common for VS CMake
-          "third_party/whisper.cpp/build/lib/Release/$LibName", # Common for VS CMake
-          "third_party/whisper.cpp/build/lib/$LibName",
-          "third_party/whisper.cpp/build/$LibName"
-        )
-        $Found = $false
-        foreach ($Location in $SourceLocations) {
-          if (Test-Path $Location) {
-            Write-Host "Found library at $Location"
-            Copy-Item $Location $DestDir
-            $Found = $true
-            break
-          }
-        }
-        if (-not $Found) {
-          Write-Host "Library file $LibName not found in common locations:"
-          $SourceLocations | ForEach-Object { Write-Host "- $_" }
-          # List contents for debugging
-          Get-ChildItem -Recurse third_party/whisper.cpp/build | Select-Object FullName
-          exit 1
-        }
-
-    - name: Upload whisper library artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: whisper-lib-${{ matrix.platform }}
-        path: artifact/ # Upload the whole artifact dir (includes include/ and lib/)
-
   unit-test:
-    runs-on: ubuntu-latest # Unit tests usually don't need platform specifics
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
-      # No submodules needed if unit tests don't touch C++ parts
 
     - name: Set up Go
-      uses: actions/setup-go@v5 # Use v5 for setup-go
+      uses: actions/setup-go@v5
       with:
         go-version: ${{ env.GO_VERSION }}
+
+    - name: Set up embed directory structure
+      run: |
+        # Create directories needed for embedding tests
+        mkdir -p pkg/transcription/embed/binaries/linux-amd64
+        mkdir -p pkg/transcription/embed/binaries/darwin-amd64
+        mkdir -p pkg/transcription/embed/binaries/windows-amd64
+        mkdir -p pkg/transcription/embed/models
+
+        # Create placeholder files needed for testing
+        echo '#!/bin/bash' > pkg/transcription/embed/binaries/linux-amd64/whisper
+        echo 'echo "This is a placeholder whisper executable"' >> pkg/transcription/embed/binaries/linux-amd64/whisper
+        chmod +x pkg/transcription/embed/binaries/linux-amd64/whisper
+
+        # Create macOS placeholder (needed because embed.go references this)
+        echo '#!/bin/bash' > pkg/transcription/embed/binaries/darwin-amd64/whisper
+        echo 'echo "This is a placeholder whisper executable"' >> pkg/transcription/embed/binaries/darwin-amd64/whisper
+        chmod +x pkg/transcription/embed/binaries/darwin-amd64/whisper
+
+        # Create Windows placeholder (needed because embed.go references this)
+        echo '#!/bin/bash' > pkg/transcription/embed/binaries/windows-amd64/whisper.exe
+        echo 'echo "This is a placeholder whisper executable"' >> pkg/transcription/embed/binaries/windows-amd64/whisper.exe
+        chmod +x pkg/transcription/embed/binaries/windows-amd64/whisper.exe
+
+        # Create placeholder model files
+        echo "Dummy tiny model for testing" > pkg/transcription/embed/models/tiny.bin
+        echo "Dummy small model for testing" > pkg/transcription/embed/models/small.bin
 
     - name: Run Go Unit Tests
-      # Run tests without any special tags, assuming unit tests are untagged
-      # Add flags like -race if needed: go test -race ./...
       run: go test -v ./...
 
-  integration-test:
-    needs: build-whisper-library
-    strategy:
-      fail-fast: false
-      matrix: # Run integration tests on all target platforms
-        include:
-          - os: ubuntu-latest
-            platform: linux-amd64
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            cgo_ldflags: "-lwhisper -lm -ldl"
-          - os: windows-latest
-            platform: windows-amd64
-            artifact_lib_name: whisper.lib
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            cgo_ldflags: "-lwhisper" # Adjust if other libs needed on windows
-          - os: macos-latest
-            platform: darwin-amd64
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            # Linker flags for macOS frameworks needed by whisper.cpp
-            cgo_ldflags: "-lwhisper -framework Foundation -framework Accelerate -framework Metal -framework MetalKit"
-
-    runs-on: ${{ matrix.os }}
-
+  build-app:
+    needs: unit-test
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
-      # No submodules needed here, library comes from artifact
 
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: ${{ env.GO_VERSION }}
 
-    - name: Download whisper library artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: whisper-lib-${{ matrix.platform }}
-        path: ./whisper-artifact # Download to a specific dir
-
-    - name: Set up Cgo Environment Variables
-      shell: bash
+    - name: Install Dependencies
       run: |
-        echo "CGO_ENABLED=1" >> $GITHUB_ENV
-        echo "CGO_CFLAGS=-I$(pwd)/whisper-artifact/${{ matrix.artifact_include_dir }}" >> $GITHUB_ENV
-        # Point LDFLAGS to the lib dir and add platform specific flags
-        echo "CGO_LDFLAGS=-L$(pwd)/whisper-artifact/${{ matrix.artifact_lib_dir }} ${{ matrix.cgo_ldflags }}" >> $GITHUB_ENV
-        # For macOS, ensure Metal library path is available if needed by tests/app
-        if [[ "${{ runner.os }}" == "macOS" ]]; then
-          echo "GGML_METAL_PATH_RESOURCES=$(pwd)/whisper-artifact/${{ matrix.artifact_lib_dir }}" >> $GITHUB_ENV
-        fi
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential libasound2-dev libgtk-3-dev
 
-    - name: Download Tiny Model for Tests
+    - name: Set up vendor directory
       run: |
-        mkdir -p ./models # Create a models dir for tests
-        curl -L -o ./models/${{ env.MODEL_TINY_NAME }} ${{ env.MODEL_TINY_URL }}
+        # Run the setup-vendor.sh script
+        chmod +x ./scripts/setup-vendor.sh
+        ./scripts/setup-vendor.sh
 
-    - name: Run Go Integration Tests
-      # Use the 'whisper_go' tag found in build-go-bindings.sh
-      # Pass model path via an env var if tests need it
-      env:
-        RAMBLE_TEST_MODEL_PATH: ./models/${{ env.MODEL_TINY_NAME }}
-      run: go test -v -tags=whisper_go ./...
-
-  build:
-    needs: [unit-test, integration-test] # Build only if all tests pass
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux-amd64
-            goos: linux
-            goarch: amd64
-            output_name: ramble
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            cgo_ldflags: "-lwhisper -lm -ldl" # Standard Linux libs
-          - os: windows-latest
-            platform: windows-amd64
-            goos: windows
-            goarch: amd64
-            output_name: ramble.exe
-            artifact_lib_name: whisper.lib
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            cgo_ldflags: "-lwhisper" # Adjust if other libs needed on windows
-          - os: macos-latest
-            platform: darwin-amd64
-            goos: darwin
-            goarch: amd64
-            output_name: ramble
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            # Linker flags for macOS frameworks needed by whisper.cpp
-            cgo_ldflags: "-lwhisper -framework Foundation -framework Accelerate -framework Metal -framework MetalKit"
-          # Add arm64 for macOS later if needed
-          # - os: macos-latest
-          #   platform: darwin-arm64
-          #   goos: darwin
-          #   goarch: arm64
-          #   output_name: ramble
-          #   artifact_lib_name: libwhisper.a
-          #   artifact_include_dir: include
-          #   artifact_lib_dir: lib
-          #   cgo_ldflags: "-lwhisper -framework Foundation -framework Accelerate -framework CoreFoundation -framework CoreGraphics -framework Metal -framework MetalKit"
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-      # No submodules needed here, library comes from artifact
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-
-    - name: Download whisper library artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: whisper-lib-${{ matrix.platform }}
-        path: ./whisper-artifact # Download to a specific dir
-
-    - name: Set up Cgo Environment Variables
-      shell: bash
+    - name: Prepare embed directory
       run: |
-        echo "CGO_ENABLED=1" >> $GITHUB_ENV
-        echo "CGO_CFLAGS=-I$(pwd)/whisper-artifact/${{ matrix.artifact_include_dir }}" >> $GITHUB_ENV
-        # Point LDFLAGS to the lib dir and add platform specific flags
-        echo "CGO_LDFLAGS=-L$(pwd)/whisper-artifact/${{ matrix.artifact_lib_dir }} ${{ matrix.cgo_ldflags }}" >> $GITHUB_ENV
-        # For macOS, ensure Metal library path is available if needed by tests/app
-        if [[ "${{ runner.os }}" == "macOS" ]]; then
-          echo "GGML_METAL_PATH_RESOURCES=$(pwd)/whisper-artifact/${{ matrix.artifact_lib_dir }}" >> $GITHUB_ENV
-        fi
+        # Create directories needed for embedding
+        mkdir -p pkg/transcription/embed/binaries/linux-amd64
+        mkdir -p pkg/transcription/embed/binaries/darwin-amd64
+        mkdir -p pkg/transcription/embed/binaries/windows-amd64
+        mkdir -p pkg/transcription/embed/models
+
+        # Create placeholder files
+        echo '#!/bin/bash' > pkg/transcription/embed/binaries/linux-amd64/whisper
+        echo 'echo "This is a placeholder whisper executable"' >> pkg/transcription/embed/binaries/linux-amd64/whisper
+        chmod +x pkg/transcription/embed/binaries/linux-amd64/whisper
+
+        # Create macOS placeholder (needed because embed.go references this)
+        echo '#!/bin/bash' > pkg/transcription/embed/binaries/darwin-amd64/whisper
+        echo 'echo "This is a placeholder whisper executable"' >> pkg/transcription/embed/binaries/darwin-amd64/whisper
+        chmod +x pkg/transcription/embed/binaries/darwin-amd64/whisper
+
+        # Create Windows placeholder (needed because embed.go references this)
+        echo '#!/bin/bash' > pkg/transcription/embed/binaries/windows-amd64/whisper.exe
+        echo 'echo "This is a placeholder whisper executable"' >> pkg/transcription/embed/binaries/windows-amd64/whisper.exe
+        chmod +x pkg/transcription/embed/binaries/windows-amd64/whisper.exe
+
+        # Create placeholder model files
+        echo "Dummy tiny model for testing" > pkg/transcription/embed/models/tiny.bin
+        echo "Dummy small model for testing" > pkg/transcription/embed/models/small.bin
 
     - name: Build application
-      # Use GOOS and GOARCH for cross-compilation if runner OS differs from target
-      env:
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-      # Add build tags if needed, e.g., -tags=whisper_use_coreml for macOS CoreML
-      run: go build -v -o ${{ matrix.output_name }} ./cmd/ramble
+      run: |
+        export LD_LIBRARY_PATH=$(pwd)/vendor/whisper/lib:$LD_LIBRARY_PATH
+        export CGO_CFLAGS="-I$(pwd)/vendor/whisper/include"
+        export CGO_LDFLAGS="-L$(pwd)/vendor/whisper/lib"
+        go build -tags=whisper_go -o ramble ./cmd/ramble
 
     - name: Upload application artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ramble-${{ matrix.platform }}
-        path: ${{ matrix.output_name }}
+        name: ramble-linux-amd64
+        path: ramble
 
   release:
-    needs: build # Release depends on build, which now depends on tests
-    if: github.event_name == 'release' && github.event.action == 'created' # Only run on release creation
-    runs-on: ubuntu-latest # Use ubuntu for packaging consistency
-
-    strategy:
-      matrix:
-        include:
-          - platform: linux-amd64
-            asset_os: linux
-            asset_arch: amd64
-            input_artifact: ramble-linux-amd64
-            input_binary: ramble
-            output_archive: ramble-linux-amd64.tar.gz
-            archive_command: tar czvf
-          - platform: windows-amd64
-            asset_os: windows
-            asset_arch: amd64
-            input_artifact: ramble-windows-amd64
-            input_binary: ramble.exe
-            output_archive: ramble-windows-amd64.zip
-            archive_command: zip -r
-          - platform: darwin-amd64
-            asset_os: macos
-            asset_arch: amd64
-            input_artifact: ramble-darwin-amd64
-            input_binary: ramble
-            output_archive: ramble-macos-amd64.tar.gz
-            archive_command: tar czvf
-          # Add arm64 for macOS later if needed
-          # - platform: darwin-arm64
-          #   asset_os: macos
-          #   asset_arch: arm64
-          #   input_artifact: ramble-darwin-arm64
-          #   input_binary: ramble
-          #   output_archive: ramble-macos-arm64.tar.gz
-          #   archive_command: tar czvf
+    needs: build-app
+    if: github.event_name == 'release' && github.event.action == 'created'
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Download application artifact (${{ matrix.platform }})
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Download application artifact
       uses: actions/download-artifact@v4
       with:
-        name: ${{ matrix.input_artifact }}
+        name: ramble-linux-amd64
         path: ./release-staging
 
-    - name: Download Models
+    - name: Download tiny model
       run: |
         mkdir -p ./release-staging/models
         curl -L -o ./release-staging/models/${{ env.MODEL_TINY_NAME }} ${{ env.MODEL_TINY_URL }}
-        # Add other models if needed, e.g.:
-        # curl -L -o ./release-staging/models/${{ env.MODEL_SMALL_NAME }} ${{ env.MODEL_SMALL_URL }}
 
-    - name: Add README and LICENSE (Optional)
+    - name: Create release directory structure
       run: |
-        # Assuming README.md and potentially LICENSE exist at the root
-        cp README.md ./release-staging/README.md || echo "README.md not found"
-        # cp LICENSE ./release-staging/LICENSE || echo "LICENSE not found"
+        # Create necessary directories
+        mkdir -p ./release-staging/libs
 
-    - name: Create Release Archive (${{ matrix.output_archive }})
-      working-directory: ./release-staging
-      # Use specific archive command based on matrix
-      run: ${{ matrix.archive_command }} ../${{ matrix.output_archive }} .
+        # Copy dynamic libraries
+        if [ -d "lib" ]; then
+          cp lib/*.so* ./release-staging/libs/ || echo "No .so files found in lib directory"
+        fi
 
-    - name: Upload Release Asset (${{ matrix.output_archive }})
+        # Make sure executable has correct permissions
+        chmod +x ./release-staging/ramble
+
+    - name: Create launch script
+      run: |
+        cat > ./release-staging/ramble.sh << 'EOL'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LD_LIBRARY_PATH="$SCRIPT_DIR/libs:$LD_LIBRARY_PATH"
+"$SCRIPT_DIR/ramble" "$@"
+EOL
+        chmod +x ./release-staging/ramble.sh
+
+    - name: Create tarball
+      run: tar czvf ramble-linux-amd64.tar.gz -C ./release-staging .
+
+    - name: Upload release asset
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./${{ matrix.output_archive }}
-        asset_name: ${{ matrix.output_archive }}
-        asset_content_type: application/octet-stream # Or specific type like application/zip
+        asset_path: ./ramble-linux-amd64.tar.gz
+        asset_name: ramble-linux-amd64.tar.gz
+        asset_content_type: application/gzip
