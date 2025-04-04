@@ -2,7 +2,7 @@ name: Build Ramble Linux Package
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, correction ]
   pull_request:
     branches: [ main ]
   release:
@@ -16,150 +16,112 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        submodules: 'recursive'  # We need the whisper.cpp submodule
+        submodules: recursive
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
     - name: Build Linux Package
-      run: |
-        # Create Dockerfile.linux with the same content as in the docker-build-linux.sh script
-        cat > Dockerfile.linux << 'EOF'
-        # === Stage 1: Base Dependencies ===
-        FROM golang:1.23-bookworm AS base
-        WORKDIR /app
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: - # Use Dockerfile.linux created inline
+        push: false
+        outputs: type=local,dest=./dist
+        build-args: |
+          GO_VERSION=1.21
+        build-contexts: |
+          whisper-builder=docker-image://debian:bookworm-slim
+        # Create the Dockerfile inline for the build
+        inline: |
+          # First stage: build whisper.cpp library
+          FROM whisper-builder as whisper-builder
 
-        # Install Linux build dependencies
-        RUN apt-get update && apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            git \
-            curl \
-            tar \
-            file \
-            # Runtime deps for whisper.cpp/Go app (needed for linking/packaging)
-            libsdl2-dev \
-            portaudio19-dev \
-            # AppImage deps
-            libfuse3-dev \
-            libglib2.0-dev \
-            # UI deps
-            libayatana-appindicator3-dev \
-            libgtk-3-dev \
-            pkg-config \
-            && rm -rf /var/lib/apt/lists/*
+          # Install build dependencies
+          RUN apt-get update && apt-get install -y \
+              build-essential \
+              cmake \
+              git \
+              g++
 
-        # === Stage 2: Build whisper.cpp for Linux ===
-        FROM base AS whisper-builder
-        WORKDIR /app/whisper.cpp-build
+          # Clone and build whisper.cpp
+          WORKDIR /app/whisper.cpp
+          RUN git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git .
+          RUN mkdir -p build && cd build && \
+              cmake -DBUILD_SHARED_LIBS=ON .. && \
+              cmake --build . --config Release --parallel $(nproc)
 
-        # Clone whisper.cpp
-        RUN git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git .
+          # Second stage: build the Go application
+          FROM golang:1.21 as builder
 
-        # Build whisper.cpp shared libraries for Linux
-        RUN cmake -B build -DWHISPER_BUILD_GO_BINDINGS=1 -DWHISPER_BUILD_SHARED=1 .
-        RUN cmake --build build --config Release --parallel $(nproc)
+          # Install dependencies needed for GUI
+          RUN apt-get update && apt-get install -y \
+              gcc libasound2-dev libgl1-mesa-dev libxcursor-dev \
+              libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev \
+              xorg-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxi-dev \
+              libxinerama-dev libxrandr-dev libxxf86vm-dev
 
-        # === Stage 3: Build Go App and Package for Linux ===
-        FROM base AS builder
-        WORKDIR /app
+          WORKDIR /app
 
-        # Copy source code
-        COPY . .
+          # Copy the repository contents
+          COPY . .
 
-        # Create libs directory
-        RUN mkdir -p /app/libs/linux
+          # Create necessary directories
+          RUN mkdir -p /app/pkg/transcription/embed/binaries/linux-amd64
+          RUN mkdir -p /app/pkg/transcription/embed/models
+          # Make sure include directory exists
+          RUN mkdir -p /app/third_party/whisper.cpp/include
 
-        # Copy built Linux libraries from whisper builder stage
-        COPY --from=whisper-builder /app/whisper.cpp-build/build/src/libwhisper.so* /app/libs/linux/
-        COPY --from=whisper-builder /app/whisper.cpp-build/build/ggml/src/libggml*.so* /app/libs/linux/
+          # Copy whisper.cpp headers and libraries from the first stage
+          COPY --from=whisper-builder /app/whisper.cpp/include/whisper.h /app/third_party/whisper.cpp/include/
+          COPY --from=whisper-builder /app/whisper.cpp/build/libwhisper.so /app/pkg/transcription/embed/binaries/linux-amd64/
 
-        # Set environment for build
-        ENV CGO_ENABLED=1
-        ENV GOOS=linux
-        ENV GOARCH=amd64
-        ENV WHISPER_CPP_DIR=/app/whisper.cpp-build
-        ENV LIBRARY_PATH=/app/libs/linux
-        ENV LD_LIBRARY_PATH=/app/libs/linux
-        ENV C_INCLUDE_PATH=/app/whisper.cpp-build/include:/app/whisper.cpp-build/ggml/include
-        ENV CGO_CFLAGS="-I/app/whisper.cpp-build/include -I/app/whisper.cpp-build/ggml/include"
-        ENV CGO_LDFLAGS="-L/app/libs/linux"
+          # Create directories for the final package
+          RUN mkdir -p /app/dist/linux-pkg/libs && \
+              mkdir -p /app/dist/linux-pkg/models
 
-        # Create output directory structure
-        RUN mkdir -p /app/dist/linux-pkg/libs && \
-            mkdir -p /app/dist/linux-pkg/models
+          # Set CGO environment variables to find the whisper header
+          ENV CGO_ENABLED=1
+          ENV CGO_CFLAGS="-I/app/third_party/whisper.cpp/include"
+          ENV CGO_LDFLAGS="-L/app/pkg/transcription/embed/binaries/linux-amd64 -lwhisper"
 
-        # Build with Go whisper bindings tag and rpath
-        RUN echo "Building Linux binary..." && \
-            go build -v -tags=whisper_go \
-            -ldflags="-s -w -extldflags '-Wl,-rpath,\$ORIGIN/libs'" \
-            -o /app/dist/linux-pkg/ramble ./cmd/ramble
+          # Build with Go whisper bindings tag and rpath
+          RUN echo "Building Linux binary..." && \
+              go build -v -tags=whisper_go \
+              -ldflags="-s -w -extldflags '-Wl,-rpath,\$ORIGIN/libs'" \
+              -o /app/dist/linux-pkg/ramble ./cmd/ramble
 
-        # --- Package Linux ---
-        # Copy libraries to package directory
-        RUN cp /app/libs/linux/* /app/dist/linux-pkg/libs/
+          # Copy libraries and prepare package
+          RUN cp /app/pkg/transcription/embed/binaries/linux-amd64/libwhisper.so /app/dist/linux-pkg/libs/ && \
+              cp -r /app/assets /app/dist/linux-pkg/ && \
+              chmod +x /app/dist/linux-pkg/ramble && \
+              cd /app/dist && \
+              tar -czf ramble-linux-amd64.tar.gz linux-pkg
 
-        # Download models
-        ARG MODEL_TINY_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
-        ARG MODEL_TINY_NAME="ggml-tiny.bin"
-        RUN curl -L -o /app/dist/linux-pkg/models/${MODEL_TINY_NAME} ${MODEL_TINY_URL}
-
-        # Copy README
-        RUN cp README.md /app/dist/linux-pkg/
-
-        # Create Linux run script
-        RUN echo '#!/bin/bash' > /app/dist/linux-pkg/run.sh && \
-            echo 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' >> /app/dist/linux-pkg/run.sh && \
-            echo 'export LD_LIBRARY_PATH="$SCRIPT_DIR/libs:$LD_LIBRARY_PATH"' >> /app/dist/linux-pkg/run.sh && \
-            echo '"$SCRIPT_DIR/ramble" "$@"' >> /app/dist/linux-pkg/run.sh && \
-            chmod +x /app/dist/linux-pkg/run.sh
-
-        # Create Linux tar.gz package
-        RUN cd /app/dist && tar -czf ramble-linux-amd64.tar.gz -C linux-pkg .
-
-        # Final stage just holds the artifacts
-        FROM scratch AS final-artifacts
-        COPY --from=builder /app/dist /
-        EOF
-
-        # Create output directory
-        mkdir -p ./dist
-
-        # Build using Docker
-        docker buildx build \
-          --platform linux/amd64 \
-          --output type=local,dest=./dist \
-          --target final-artifacts \
-          --tag ramble:linux \
-          -f Dockerfile.linux .
-
-        # List the generated artifacts for verification
-        ls -la ./dist
+          # Stage 3: Create minimal runtime image
+          FROM scratch as export
+          COPY --from=builder /app/dist /
 
     - name: Upload Linux Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ramble-linux-amd64
-        path: dist/ramble-linux-amd64.tar.gz
+        path: ./dist/ramble-linux-amd64.tar.gz
         if-no-files-found: error
 
   release:
     needs: build-linux
-    if: github.event_name == 'release' && github.event.action == 'created'
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
     - name: Download Linux Artifact
       uses: actions/download-artifact@v4
       with:
         name: ramble-linux-amd64
-        path: ./release-artifacts
+        path: ./dist
 
-    - name: Upload Linux Release Asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Upload to Release
+      uses: softprops/action-gh-release@v1
       with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./release-artifacts/ramble-linux-amd64.tar.gz
-        asset_name: ramble-linux-amd64.tar.gz
-        asset_content_type: application/gzip
+        files: |
+          ./dist/ramble-linux-amd64.tar.gz
