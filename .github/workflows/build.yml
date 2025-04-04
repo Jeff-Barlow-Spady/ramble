@@ -15,7 +15,7 @@ env:
   MODEL_SMALL_NAME: "ggml-small.bin"
   MODEL_TINY_NAME: "ggml-tiny.bin"
   # Define Go version centrally
-  GO_VERSION: '1.21' # Keep consistent with original build job
+  GO_VERSION: '1.23' # Keep consistent with original build job
 
 jobs:
   build-whisper-library:
