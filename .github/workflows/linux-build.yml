@@ -1,0 +1,87 @@
+name: Build Ramble Linux Package
+
+on:
+  push:
+    branches: [ main, correction ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ created ]
+  workflow_dispatch:  # Allow manual triggering of the workflow
+
+env:
+  # Define model URLs centrally
+  MODEL_TINY_URL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
+  MODEL_TINY_NAME: "ggml-tiny.bin"
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build with Docker
+      run: |
+        # Build the application using Docker
+        docker build -t ramble-builder -f Dockerfile.build .
+
+        # Create output directory
+        mkdir -p ./dist
+
+        # Extract build artifacts
+        docker run --rm -v $(pwd)/dist:/output ramble-builder bash -c 'go build -v -tags=whisper_go -o /output/ramble ./cmd/ramble && cp libs/lib/libwhisper.so /output/'
+
+        # Verify the output
+        ls -la ./dist
+
+    - name: Prepare Release Package
+      run: |
+        mkdir -p ./release
+
+        # Copy binary and library
+        cp ./dist/ramble ./release/
+        cp ./dist/libwhisper.so ./release/
+
+        # Create launcher script
+        cat > ./release/run.sh << 'EOL'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LD_LIBRARY_PATH="$SCRIPT_DIR:$LD_LIBRARY_PATH"
+"$SCRIPT_DIR/ramble" "$@"
+EOL
+        chmod +x ./release/run.sh
+
+        # Download model for testing
+        mkdir -p ./release/models
+        curl -L -o ./release/models/${{ env.MODEL_TINY_NAME }} ${{ env.MODEL_TINY_URL }}
+
+        # Create the archive
+        tar -czvf ramble-linux-amd64.tar.gz -C ./release .
+
+    - name: Upload Application Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ramble-linux-amd64
+        path: ./release/ramble
+
+    - name: Upload Package Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ramble-linux-package
+        path: ./ramble-linux-amd64.tar.gz
+
+    # Only when this is a release
+    - name: Upload Release Asset
+      if: github.event_name == 'release'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./ramble-linux-amd64.tar.gz
+        asset_name: ramble-linux-amd64.tar.gz
+        asset_content_type: application/gzip

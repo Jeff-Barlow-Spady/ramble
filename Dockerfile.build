@@ -1,0 +1,57 @@
+FROM golang:1.21-bullseye
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    cmake \
+    build-essential \
+    libx11-dev \
+    libxrandr-dev \
+    libxinerama-dev \
+    libxcursor-dev \
+    libxi-dev \
+    libgl1-mesa-dev \
+    xorg-dev \
+    portaudio19-dev \
+    libasound2-dev \
+    libayatana-appindicator3-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy only go.mod and go.sum first to leverage Docker cache
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Build whisper.cpp in a subdirectory
+WORKDIR /app/third_party
+RUN mkdir -p whisper.cpp
+RUN git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git whisper.cpp
+WORKDIR /app/third_party/whisper.cpp
+RUN mkdir -p build && \
+    cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DWHISPER_BUILD_SHARED=ON \
+          -DWHISPER_BUILD_EXAMPLES=OFF \
+          .. && \
+    cmake --build . --parallel
+
+# Create directories needed for libraries
+WORKDIR /app
+RUN mkdir -p libs/include libs/lib
+
+# Copy headers and libraries
+RUN cp third_party/whisper.cpp/include/whisper.h libs/include/ && \
+    cp third_party/whisper.cpp/build/src/libwhisper.so libs/lib/
+
+# Now copy the rest of the code
+COPY . .
+
+# Build the application
+ENV CGO_ENABLED=1
+ENV CGO_CFLAGS="-I/app/libs/include"
+ENV CGO_LDFLAGS="-L/app/libs/lib -lwhisper"
+ENV LD_LIBRARY_PATH="/app/libs/lib:${LD_LIBRARY_PATH}"
+
+# Default command builds the application
+CMD ["go", "build", "-v", "-tags=whisper_go", "-o", "ramble", "./cmd/ramble"]
