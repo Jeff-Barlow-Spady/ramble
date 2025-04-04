@@ -22,14 +22,6 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Build Linux Package
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile.linux
-        push: false
-        outputs: type=local,dest=./dist
-
     - name: Create Dockerfile.linux
       run: |
         cat > Dockerfile.linux << 'EOF'
@@ -112,6 +104,14 @@ jobs:
 
     - name: Show Generated Dockerfile
       run: cat Dockerfile.linux
+
+    - name: Build Linux Package
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile.linux
+        push: false
+        outputs: type=local,dest=./dist
 
     - name: List Build Output
       run: ls -la ./dist || echo "No dist directory yet"
