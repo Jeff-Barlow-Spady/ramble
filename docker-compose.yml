@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  ramble:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ramble:latest
+    volumes:
+      - ./models:/app/models
+    devices:
+      - /dev/snd:/dev/snd  # For audio input
+    environment:
+      - DISPLAY=${DISPLAY}  # For GUI applications
+    network_mode: host      # Simplifies X11 forwarding
+    # Note: For GUI applications in Docker, you may need to run:
+    # xhost +local:docker
+    # before starting the container

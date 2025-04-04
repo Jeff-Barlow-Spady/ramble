@@ -21,6 +21,50 @@ ramble/
 └── models/             # Default speech recognition models
 ```
 
+## Building Ramble
+
+Ramble has been simplified to make building and development easier. We now use a vendor-based approach for managing the whisper.cpp dependency.
+
+### Quick Start
+
+For a quick build:
+
+```bash
+# Set up the vendor directory with necessary libraries and headers
+./scripts/setup-vendor.sh
+
+# Build and run the application
+./scripts/run.sh
+```
+
+This approach ensures all required libraries are properly copied to the vendor directory, avoiding path issues and broken symlinks.
+
+### Customizing the Whisper.cpp Version
+
+You can specify a version tag when building whisper.cpp:
+
+```bash
+./scripts/build-whisper.sh v1.5.2
+```
+
+### Development Environment
+
+The project structure has been simplified:
+- `vendor/whisper/` - Contains the minimal required whisper.cpp files
+  - `include/` - Header files
+  - `lib/` - Library files
+- No full whisper.cpp submodule required
+
+### CI/CD
+
+Our GitHub Actions workflow has been simplified to:
+1. Build the whisper.cpp library for each platform
+2. Store only the needed files in the vendor directory
+3. Build the application using these vendor files
+4. Package for distribution
+
+This approach makes builds cleaner, faster, and more reliable.
+
 ## Building the Application
 
 ### Prerequisites

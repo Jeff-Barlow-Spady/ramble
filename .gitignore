@@ -77,3 +77,6 @@ pkg/transcription/embed/models/*.bin
 !pkg/transcription/embed/binaries/.keep
 !pkg/transcription/embed/models/.keep
 !pkg/transcription/embed/binaries/*-*/
+
+# Vendor directory for whisper
+/vendor/whisper/
