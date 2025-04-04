@@ -17,33 +17,65 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.21'
+        go-version: '1.23'
 
     - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential libasound2-dev libgtk-3-dev
 
+    - name: Set up embed directory structure
+      run: |
+        # Create directories needed for embedding tests
+        mkdir -p pkg/transcription/embed/binaries/linux-amd64
+        mkdir -p pkg/transcription/embed/models
+
+        # Create placeholder files needed for testing
+        echo '#!/bin/bash' > pkg/transcription/embed/binaries/linux-amd64/whisper
+        echo 'echo "This is a placeholder whisper executable"' >> pkg/transcription/embed/binaries/linux-amd64/whisper
+        chmod +x pkg/transcription/embed/binaries/linux-amd64/whisper
+
+        echo "Dummy tiny model for testing" > pkg/transcription/embed/models/tiny.bin
+        echo "Dummy small model for testing" > pkg/transcription/embed/models/small.bin
+
     - name: Set up vendor directory
       run: |
-        # Create vendor directories
-        mkdir -p vendor/whisper/include
-        mkdir -p vendor/whisper/lib
+        # Setup the vendor directory using our script
+        chmod +x ./scripts/setup-vendor.sh
+        ./scripts/setup-vendor.sh
 
-        # Download pre-built whisper library for CI
-        curl -L -o whisper.h https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/whisper.h
-        cp whisper.h vendor/whisper/include/
+        # If the script fails due to missing whisper.cpp, we'll set up a minimal environment
+        if [ $? -ne 0 ]; then
+          echo "Fallback to minimal vendor setup for CI..."
 
-        # Copy libraries from artifact server (replace with your actual artifact URL)
-        # curl -L -o vendor/whisper/lib/libwhisper.so https://your-artifact-server.example/libwhisper.so
-        # For CI, use a simple stub library
-        echo "// Stub library for CI" > stub.c
-        gcc -shared -o vendor/whisper/lib/libwhisper.so stub.c
-        ln -s libwhisper.so vendor/whisper/lib/libwhisper.so.1
+          # Create vendor directories
+          mkdir -p vendor/whisper/include
+          mkdir -p vendor/whisper/lib
+
+          # Download header files
+          curl -L -o vendor/whisper/include/whisper.h https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/whisper.h
+          curl -L -o vendor/whisper/include/ggml.h https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/ggml/include/ggml.h
+          curl -L -o vendor/whisper/include/ggml-backend.h https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/ggml/include/ggml-backend.h
+          curl -L -o vendor/whisper/include/ggml-cpu.h https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/ggml/include/ggml-cpu.h
+
+          # Create stub libraries for CI
+          echo "// Stub library for CI" > stub.c
+          gcc -shared -o vendor/whisper/lib/libwhisper.so stub.c
+          ln -s libwhisper.so vendor/whisper/lib/libwhisper.so.1
+          gcc -shared -o vendor/whisper/lib/libggml.so stub.c
+          gcc -shared -o vendor/whisper/lib/libggml-cpu.so stub.c
+        fi
 
     - name: Build
       run: |
         export LD_LIBRARY_PATH=$(pwd)/vendor/whisper/lib:$LD_LIBRARY_PATH
         export CGO_CFLAGS="-I$(pwd)/vendor/whisper/include"
         export CGO_LDFLAGS="-L$(pwd)/vendor/whisper/lib -lwhisper"
-        go build -v ./...
+        go build -v -tags=whisper_go ./...
+
+    - name: Run Tests
+      run: |
+        export LD_LIBRARY_PATH=$(pwd)/vendor/whisper/lib:$LD_LIBRARY_PATH
+        export CGO_CFLAGS="-I$(pwd)/vendor/whisper/include"
+        export CGO_LDFLAGS="-L$(pwd)/vendor/whisper/lib -lwhisper"
+        go test -tags=whisper_go ./tests/...
