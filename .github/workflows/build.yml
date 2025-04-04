@@ -29,7 +29,7 @@ jobs:
         push: false
         outputs: type=local,dest=./dist
         build-args: |
-          GO_VERSION=1.23
+          GO_VERSION=1.21
         build-contexts: |
           whisper-builder=docker-image://debian:bookworm-slim
         # Create the Dockerfile inline for the build
@@ -45,11 +45,12 @@ jobs:
               g++
 
           # Clone and build whisper.cpp
-          WORKDIR /app/whisper.cpp
+          WORKDIR /app/whisper.cpp-build
           RUN git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git .
-          RUN mkdir -p build && cd build && \
-              cmake -DBUILD_SHARED_LIBS=ON .. && \
-              cmake --build . --config Release --parallel $(nproc)
+
+          # Build whisper.cpp with Go bindings and shared libraries
+          RUN cmake -B build -DWHISPER_BUILD_GO_BINDINGS=1 -DWHISPER_BUILD_SHARED=1 .
+          RUN cmake --build build --config Release --parallel $(nproc)
 
           # Second stage: build the Go application
           FROM golang:1.21 as builder
@@ -69,21 +70,39 @@ jobs:
           # Create necessary directories
           RUN mkdir -p /app/pkg/transcription/embed/binaries/linux-amd64
           RUN mkdir -p /app/pkg/transcription/embed/models
-          # Make sure include directory exists
+          # Create include directories for whisper and ggml headers
           RUN mkdir -p /app/third_party/whisper.cpp/include
+          RUN mkdir -p /app/third_party/whisper.cpp/ggml/include
+
+          # Copy libs directory for easier access
+          RUN mkdir -p /app/libs/linux
 
           # Copy whisper.cpp headers and libraries from the first stage
-          COPY --from=whisper-builder /app/whisper.cpp/include/whisper.h /app/third_party/whisper.cpp/include/
-          COPY --from=whisper-builder /app/whisper.cpp/build/libwhisper.so /app/pkg/transcription/embed/binaries/linux-amd64/
+          COPY --from=whisper-builder /app/whisper.cpp-build/include/whisper.h /app/third_party/whisper.cpp/include/
+          COPY --from=whisper-builder /app/whisper.cpp-build/ggml/include/ggml.h /app/third_party/whisper.cpp/ggml/include/
+
+          # Copy all required libraries
+          COPY --from=whisper-builder /app/whisper.cpp-build/build/src/libwhisper.so* /app/libs/linux/
+          COPY --from=whisper-builder /app/whisper.cpp-build/build/ggml/src/libggml*.so* /app/libs/linux/
+
+          # Copy to embed binaries too for tests
+          COPY --from=whisper-builder /app/whisper.cpp-build/build/src/libwhisper.so* /app/pkg/transcription/embed/binaries/linux-amd64/
+          COPY --from=whisper-builder /app/whisper.cpp-build/build/ggml/src/libggml*.so* /app/pkg/transcription/embed/binaries/linux-amd64/
 
           # Create directories for the final package
           RUN mkdir -p /app/dist/linux-pkg/libs && \
               mkdir -p /app/dist/linux-pkg/models
 
-          # Set CGO environment variables to find the whisper header
+          # Set environment for build
           ENV CGO_ENABLED=1
-          ENV CGO_CFLAGS="-I/app/third_party/whisper.cpp/include"
-          ENV CGO_LDFLAGS="-L/app/pkg/transcription/embed/binaries/linux-amd64 -lwhisper"
+          ENV GOOS=linux
+          ENV GOARCH=amd64
+          ENV WHISPER_CPP_DIR=/app/whisper.cpp-build
+          ENV LIBRARY_PATH=/app/libs/linux
+          ENV LD_LIBRARY_PATH=/app/libs/linux
+          ENV C_INCLUDE_PATH=/app/third_party/whisper.cpp/include:/app/third_party/whisper.cpp/ggml/include
+          ENV CGO_CFLAGS="-I/app/third_party/whisper.cpp/include -I/app/third_party/whisper.cpp/ggml/include"
+          ENV CGO_LDFLAGS="-L/app/libs/linux -lwhisper -lggml"
 
           # Build with Go whisper bindings tag and rpath
           RUN echo "Building Linux binary..." && \
@@ -92,7 +111,7 @@ jobs:
               -o /app/dist/linux-pkg/ramble ./cmd/ramble
 
           # Copy libraries and prepare package
-          RUN cp /app/pkg/transcription/embed/binaries/linux-amd64/libwhisper.so /app/dist/linux-pkg/libs/ && \
+          RUN cp /app/libs/linux/* /app/dist/linux-pkg/libs/ && \
               cp -r /app/assets /app/dist/linux-pkg/ && \
               chmod +x /app/dist/linux-pkg/ramble && \
               cd /app/dist && \
