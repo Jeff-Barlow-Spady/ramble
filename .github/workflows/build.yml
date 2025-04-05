@@ -16,534 +16,98 @@ env:
   MODEL_SMALL_NAME: "ggml-small.bin"
   MODEL_TINY_NAME: "ggml-tiny.bin"
   # Define Go version centrally
-  GO_VERSION: '1.23' # Keep consistent with original build job
+  GO_VERSION: '1.21' # Use a stable Go version
 
 jobs:
-  build-whisper-library:
-    strategy:
-      fail-fast: false # Allow other platforms to continue if one fails
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux-amd64
-            c_compiler: gcc
-            cxx_compiler: g++
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-          - os: windows-latest
-            platform: windows-amd64
-            c_compiler: cl.exe # MSVC compiler
-            cxx_compiler: cl.exe
-            artifact_lib_name: whisper.lib # Static lib name for MSVC
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-          - os: macos-latest # Use latest for potential arm64 later
-            platform: darwin-amd64
-            c_compiler: clang
-            cxx_compiler: clang++
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-          # Add arm64 for macOS later if needed
-          # - os: macos-latest
-          #   platform: darwin-arm64
-          #   c_compiler: clang
-          #   cxx_compiler: clang++
-          #   artifact_lib_name: libwhisper.a
-          #   artifact_include_dir: include
-          #   artifact_lib_dir: lib
-
-    runs-on: ${{ matrix.os }}
-
+  docker-build:
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        submodules: 'false' # Don't use recursive checkout as it's causing issues
+        submodules: 'recursive'  # Properly check out submodules
 
-    - name: Checkout whisper.cpp Submodule
-      shell: bash
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker Image
       run: |
-        # Make sure the directory exists
-        mkdir -p third_party
-        # Remove any existing files if they exist
-        rm -rf third_party/whisper.cpp
-        # Directly clone the repo instead of using submodules
-        git clone https://github.com/ggerganov/whisper.cpp.git third_party/whisper.cpp
+        docker build -t ramble-builder -f Dockerfile.build .
 
-    - name: Verify Submodule Structure
-      shell: bash
+    - name: Extract Build Artifacts
       run: |
-        if [ ! -d "third_party/whisper.cpp" ]; then
-          echo "Error: third_party/whisper.cpp directory not found. Checking .gitmodules file:"
-          cat .gitmodules
-          echo "Listing the directories:"
-          ls -la
-          ls -la third_party || echo "third_party directory not found"
-          exit 1
-        else
-          echo "Submodule directory exists at third_party/whisper.cpp"
-          ls -la third_party/whisper.cpp
-        fi
+        # Create a temporary container
+        CONTAINER_ID=$(docker create ramble-builder)
 
-    - name: Install Build Dependencies (Linux)
-      if: runner.os == 'Linux'
-      run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+        # Create directory
+        mkdir -p ./dist
 
-    - name: Install Build Dependencies (macOS)
-      if: runner.os == 'macOS'
-      run: brew install cmake
+        # Extract the binary
+        docker cp $CONTAINER_ID:/app/ramble ./dist/
 
-    # Windows uses Visual Studio Build Tools available in the runner environment
+        # Extract required libraries
+        docker cp $CONTAINER_ID:/usr/local/lib/libwhisper.so ./dist/
+        docker cp $CONTAINER_ID:/usr/local/lib/libggml.so ./dist/ || true
+        docker cp $CONTAINER_ID:/usr/local/lib/libggml-base.so ./dist/ || true
+        docker cp $CONTAINER_ID:/usr/local/lib/libggml-cpu.so ./dist/ || true
 
-    - name: Configure CMake (Linux/macOS)
-      if: runner.os != 'Windows'
-      working-directory: ./third_party/whisper.cpp
-      run: >
-        cmake -S . -B build
-        -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
-        -DCMAKE_CXX_COMPILER=${{ matrix.cxx_compiler }}
-        -DCMAKE_BUILD_TYPE=Release
-        -DBUILD_SHARED_LIBS=OFF
-        -DWHISPER_BUILD_EXAMPLES=OFF
-        -DWHISPER_BUILD_TESTS=OFF
-        -DWHISPER_BUILD_SERVER=OFF
-        -DWHISPER_BUILD_TOOLS=OFF # Don't need tools like 'main' or 'stream'
+        # Remove the temporary container
+        docker rm $CONTAINER_ID
 
-    - name: Configure CMake (Windows)
-      if: runner.os == 'Windows'
-      working-directory: ./third_party/whisper.cpp
-      run: >
-        cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-        -DCMAKE_BUILD_TYPE=Release
-        -DBUILD_SHARED_LIBS=OFF
-        -DWHISPER_BUILD_EXAMPLES=OFF
-        -DWHISPER_BUILD_TESTS=OFF
-        -DWHISPER_BUILD_SERVER=OFF
-        -DWHISPER_BUILD_TOOLS=OFF
+        # List extracted files
+        ls -la ./dist
 
-    - name: Build whisper library
-      working-directory: ./third_party/whisper.cpp
-      run: cmake --build build --config Release --target whisper # Target the library itself
-
-    - name: Prepare Artifact Directory
+    - name: Prepare Release Package
       run: |
-        mkdir -p artifact/${{ matrix.artifact_include_dir }}
-        mkdir -p artifact/${{ matrix.artifact_lib_dir }}
+        mkdir -p ./release
 
-    - name: Copy Headers
-      run: cp -r third_party/whisper.cpp/include/whisper.h artifact/${{ matrix.artifact_include_dir }}/
+        # Copy binary and libraries
+        cp ./dist/ramble ./release/
+        cp ./dist/*.so ./release/ || true
 
-    - name: Copy Library (Linux/macOS)
-      if: runner.os != 'Windows'
-      shell: bash
-      run: |
-        # Check common locations for the static library
-        if [[ -f "third_party/whisper.cpp/build/src/${{ matrix.artifact_lib_name }}" ]]; then
-          cp "third_party/whisper.cpp/build/src/${{ matrix.artifact_lib_name }}" "artifact/${{ matrix.artifact_lib_dir }}/"
-          echo "Copied library from build/src/"
-        elif [[ -f "third_party/whisper.cpp/build/lib/${{ matrix.artifact_lib_name }}" ]]; then
-          cp "third_party/whisper.cpp/build/lib/${{ matrix.artifact_lib_name }}" "artifact/${{ matrix.artifact_lib_dir }}/"
-          echo "Copied library from build/lib/"
-        elif [[ -f "third_party/whisper.cpp/build/${{ matrix.artifact_lib_name }}" ]]; then
-          cp "third_party/whisper.cpp/build/${{ matrix.artifact_lib_name }}" "artifact/${{ matrix.artifact_lib_dir }}/"
-          echo "Copied library from build/"
-        else
-          echo "Library file ${{ matrix.artifact_lib_name }} not found in common locations (build/src/, build/lib/, build/)"
-          # List contents for debugging
-          ls -R third_party/whisper.cpp/build
-          exit 1
-        fi
+        # Create launcher script
+        cat > ./release/run.sh << 'EOL'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LD_LIBRARY_PATH="$SCRIPT_DIR:$LD_LIBRARY_PATH"
+"$SCRIPT_DIR/ramble" "$@"
+EOL
+        chmod +x ./release/run.sh
 
-    - name: Copy Library (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh # Use PowerShell for better cross-platform scripting if needed, or stick to cmd
-      run: |
-        $LibName = "${{ matrix.artifact_lib_name }}"
-        $SourceDir = "${{ github.workspace }}/third_party/whisper.cpp/build/src"
-        $ReleaseSourceDir = "${{ github.workspace }}/third_party/whisper.cpp/build/src/Release" # Common location for MSVC builds
-        $TargetDir = "${{ github.workspace }}/artifact/${{ matrix.artifact_lib_dir }}"
-        New-Item -ItemType Directory -Force -Path $TargetDir
-        if (Test-Path "$SourceDir/$LibName") {
-          Copy-Item "$SourceDir/$LibName" -Destination $TargetDir
-          echo "Copied library from $SourceDir"
-        } elseif (Test-Path "$ReleaseSourceDir/$LibName") {
-          Copy-Item "$ReleaseSourceDir/$LibName" -Destination $TargetDir
-          echo "Copied library from $ReleaseSourceDir"
-        } else {
-          Write-Host "Library file $LibName not found in common locations:"
-          $SourceDir, $ReleaseSourceDir | ForEach-Object { Write-Host "- $_" }
-          # List contents for debugging
-          Get-ChildItem -Recurse third_party/whisper.cpp/build | Select-Object FullName
-          exit 1
-        }
+        # Download model for testing
+        mkdir -p ./release/models
+        curl -L -o ./release/models/${{ env.MODEL_TINY_NAME }} ${{ env.MODEL_TINY_URL }}
+        curl -L -o ./release/models/${{ env.MODEL_SMALL_NAME }} ${{ env.MODEL_SMALL_URL }}
 
-    - name: Upload whisper library artifact
+        # Create the archive
+        tar -czvf ramble-linux-amd64.tar.gz -C ./release .
+
+    - name: Upload Application Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: whisper-lib-${{ matrix.platform }}
-        path: artifact/ # Upload the whole artifact dir (includes include/ and lib/)
+        name: ramble-linux-amd64
+        path: ./release/ramble
 
-  unit-test:
-    runs-on: ubuntu-latest # Unit tests usually don't need platform specifics
-    steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-      with:
-        submodules: 'false' # Don't use recursive checkout as it's causing issues
-
-    - name: Checkout whisper.cpp Submodule
-      run: |
-        # Make sure the directory exists
-        mkdir -p third_party
-        # Remove any existing files if they exist
-        rm -rf third_party/whisper.cpp
-        # Directly clone the repo instead of using submodules
-        git clone https://github.com/ggerganov/whisper.cpp.git third_party/whisper.cpp
-
-    - name: Verify Submodule Structure
-      shell: bash
-      run: |
-        if [ ! -d "third_party/whisper.cpp" ]; then
-          echo "Error: third_party/whisper.cpp directory not found. Checking .gitmodules file:"
-          cat .gitmodules
-          echo "Listing the directories:"
-          ls -la
-          ls -la third_party || echo "third_party directory not found"
-          exit 1
-        else
-          echo "Submodule directory exists at third_party/whisper.cpp"
-          ls -la third_party/whisper.cpp
-        fi
-
-    - name: Set up Go
-      uses: actions/setup-go@v5 # Use v5 for setup-go
-      with:
-        go-version: ${{ env.GO_VERSION }}
-
-    - name: Install Build Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake build-essential
-        # Dependencies for X11 and UI libraries
-        sudo apt-get install -y libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
-        # Dependencies for audio libraries
-        sudo apt-get install -y portaudio19-dev libasound2-dev
-        # Dependencies for GL
-        sudo apt-get install -y libgl1-mesa-dev xorg-dev
-
-    - name: Build whisper.cpp
-      working-directory: ./third_party/whisper.cpp
-      run: |
-        mkdir -p build
-        cd build
-        cmake -DWHISPER_BUILD_GO_BINDINGS=1 -DWHISPER_BUILD_SHARED=1 ..
-        cmake --build . --parallel
-
-    - name: Run Go Unit Tests
-      env:
-        CGO_ENABLED: 1
-        CGO_CFLAGS: "-I$(pwd)/third_party/whisper.cpp/include -I$(pwd)/third_party/whisper.cpp/ggml/include"
-        CGO_LDFLAGS: "-L$(pwd)/third_party/whisper.cpp/build/src -lwhisper"
-      # Run only tests that don't require UI components
-      run: go test -v -tags=whisper_go ./pkg/config ./pkg/transcription/embed ./tests/unit
-
-  integration-test:
-    needs: build-whisper-library
-    strategy:
-      fail-fast: false
-      matrix: # Run integration tests on all target platforms
-        include:
-          - os: ubuntu-latest
-            platform: linux-amd64
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            cgo_ldflags: "-lwhisper -lm -ldl"
-          - os: windows-latest
-            platform: windows-amd64
-            artifact_lib_name: whisper.lib
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            cgo_ldflags: "-lwhisper" # Adjust if other libs needed on windows
-          - os: macos-latest
-            platform: darwin-amd64
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            # Linker flags for macOS frameworks needed by whisper.cpp
-            cgo_ldflags: "-lwhisper -framework Foundation -framework Accelerate -framework Metal -framework MetalKit"
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-      with:
-        submodules: 'false' # Don't use recursive checkout as it's causing issues
-
-    - name: Checkout whisper.cpp Submodule
-      shell: bash
-      run: |
-        # Make sure the directory exists
-        mkdir -p third_party
-        # Remove any existing files if they exist
-        rm -rf third_party/whisper.cpp
-        # Directly clone the repo instead of using submodules
-        git clone https://github.com/ggerganov/whisper.cpp.git third_party/whisper.cpp
-
-    - name: Verify Submodule Structure
-      shell: bash
-      run: |
-        if [ ! -d "third_party/whisper.cpp" ]; then
-          echo "Error: third_party/whisper.cpp directory not found. Checking .gitmodules file:"
-          cat .gitmodules
-          echo "Listing the directories:"
-          ls -la
-          ls -la third_party || echo "third_party directory not found"
-          exit 1
-        else
-          echo "Submodule directory exists at third_party/whisper.cpp"
-          ls -la third_party/whisper.cpp
-        fi
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-
-    - name: Install Required Dependencies
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake build-essential
-        # Dependencies for X11 and UI libraries
-        sudo apt-get install -y libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
-        # Dependencies for audio libraries
-        sudo apt-get install -y portaudio19-dev libasound2-dev
-        # Dependencies for GL
-        sudo apt-get install -y libgl1-mesa-dev xorg-dev
-
-    - name: Install Required Dependencies (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        brew install portaudio
-
-    - name: Download whisper library artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: whisper-lib-${{ matrix.platform }}
-        path: ./whisper-artifact # Download to a specific dir
-
-    - name: Set up Cgo Environment Variables
-      shell: bash
-      run: |
-        echo "CGO_ENABLED=1" >> $GITHUB_ENV
-        echo "CGO_CFLAGS=-I$(pwd)/whisper-artifact/${{ matrix.artifact_include_dir }}" >> $GITHUB_ENV
-        # Point LDFLAGS to the lib dir and add platform specific flags
-        echo "CGO_LDFLAGS=-L$(pwd)/whisper-artifact/${{ matrix.artifact_lib_dir }} ${{ matrix.cgo_ldflags }}" >> $GITHUB_ENV
-        # For macOS, ensure Metal library path is available if needed by tests/app
-        if [[ "${{ runner.os }}" == "macOS" ]]; then
-          echo "GGML_METAL_PATH_RESOURCES=$(pwd)/whisper-artifact/${{ matrix.artifact_lib_dir }}" >> $GITHUB_ENV
-        fi
-
-    - name: Download Tiny Model for Tests
-      run: |
-        mkdir -p ./models # Create a models dir for tests
-        curl -L -o ./models/${{ env.MODEL_TINY_NAME }} ${{ env.MODEL_TINY_URL }}
-
-    - name: Run Go Integration Tests
-      # Use the 'whisper_go' tag found in build-go-bindings.sh
-      # Pass model path via an env var if tests need it
-      env:
-        RAMBLE_TEST_MODEL_PATH: ./models/${{ env.MODEL_TINY_NAME }}
-      # Run only core integration tests
-      run: go test -v -tags=whisper_go ./tests/integration
-
-  build:
-    needs: [unit-test, integration-test] # Build only if all tests pass
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux-amd64
-            goos: linux
-            goarch: amd64
-            output_name: ramble
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            cgo_ldflags: "-lwhisper -lm -ldl" # Standard Linux libs
-          - os: windows-latest
-            platform: windows-amd64
-            goos: windows
-            goarch: amd64
-            output_name: ramble.exe
-            artifact_lib_name: whisper.lib
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            cgo_ldflags: "-lwhisper" # Adjust if other libs needed on windows
-          - os: macos-latest
-            platform: darwin-amd64
-            goos: darwin
-            goarch: amd64
-            output_name: ramble
-            artifact_lib_name: libwhisper.a
-            artifact_include_dir: include
-            artifact_lib_dir: lib
-            # Linker flags for macOS frameworks needed by whisper.cpp
-            cgo_ldflags: "-lwhisper -framework Foundation -framework Accelerate -framework Metal -framework MetalKit"
-          # Add arm64 for macOS later if needed
-          # - os: macos-latest
-          #   platform: darwin-arm64
-          #   goos: darwin
-          #   goarch: arm64
-          #   output_name: ramble
-          #   artifact_lib_name: libwhisper.a
-          #   artifact_include_dir: include
-          #   artifact_lib_dir: lib
-          #   cgo_ldflags: "-lwhisper -framework Foundation -framework Accelerate -framework CoreFoundation -framework CoreGraphics -framework Metal -framework MetalKit"
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-      with:
-        submodules: 'false' # Don't use recursive checkout as it's causing issues
-
-    - name: Checkout whisper.cpp Submodule
-      run: |
-        # Make sure the directory exists
-        mkdir -p third_party
-        # Remove any existing files if they exist
-        rm -rf third_party/whisper.cpp
-        # Directly clone the repo instead of using submodules
-        git clone https://github.com/ggerganov/whisper.cpp.git third_party/whisper.cpp
-
-    - name: Verify Submodule Structure
-      shell: bash
-      run: |
-        if [ ! -d "third_party/whisper.cpp" ]; then
-          echo "Error: third_party/whisper.cpp directory not found. Checking .gitmodules file:"
-          cat .gitmodules
-          echo "Listing the directories:"
-          ls -la
-          ls -la third_party || echo "third_party directory not found"
-          exit 1
-        else
-          echo "Submodule directory exists at third_party/whisper.cpp"
-          ls -la third_party/whisper.cpp
-        fi
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-
-    - name: Download whisper library artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: whisper-lib-${{ matrix.platform }}
-        path: ./whisper-artifact # Download to a specific dir
-
-    - name: Set up Cgo Environment Variables
-      shell: bash
-      run: |
-        echo "CGO_ENABLED=1" >> $GITHUB_ENV
-        echo "CGO_CFLAGS=-I$(pwd)/whisper-artifact/${{ matrix.artifact_include_dir }}" >> $GITHUB_ENV
-        # Point LDFLAGS to the lib dir and add platform specific flags
-        echo "CGO_LDFLAGS=-L$(pwd)/whisper-artifact/${{ matrix.artifact_lib_dir }} ${{ matrix.cgo_ldflags }}" >> $GITHUB_ENV
-        # For macOS, ensure Metal library path is available if needed by tests/app
-        if [[ "${{ runner.os }}" == "macOS" ]]; then
-          echo "GGML_METAL_PATH_RESOURCES=$(pwd)/whisper-artifact/${{ matrix.artifact_lib_dir }}" >> $GITHUB_ENV
-        fi
-
-    - name: Build application
-      # Use GOOS and GOARCH for cross-compilation if runner OS differs from target
-      env:
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-      # Add build tags if needed, e.g., -tags=whisper_use_coreml for macOS CoreML
-      run: go build -v -o ${{ matrix.output_name }} ./cmd/ramble
-
-    - name: Upload application artifact
+    - name: Upload Libraries Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ramble-${{ matrix.platform }}
-        path: ${{ matrix.output_name }}
+        name: ramble-libs
+        path: ./release/*.so
 
-  release:
-    needs: build # Release depends on build, which now depends on tests
-    if: github.event_name == 'release' && github.event.action == 'created' # Only run on release creation
-    runs-on: ubuntu-latest # Use ubuntu for packaging consistency
-
-    strategy:
-      matrix:
-        include:
-          - platform: linux-amd64
-            asset_os: linux
-            asset_arch: amd64
-            input_artifact: ramble-linux-amd64
-            input_binary: ramble
-            output_archive: ramble-linux-amd64.tar.gz
-            archive_command: tar czvf
-          - platform: windows-amd64
-            asset_os: windows
-            asset_arch: amd64
-            input_artifact: ramble-windows-amd64
-            input_binary: ramble.exe
-            output_archive: ramble-windows-amd64.zip
-            archive_command: zip -r
-          - platform: darwin-amd64
-            asset_os: macos
-            asset_arch: amd64
-            input_artifact: ramble-darwin-amd64
-            input_binary: ramble
-            output_archive: ramble-macos-amd64.tar.gz
-            archive_command: tar czvf
-          # Add arm64 for macOS later if needed
-          # - platform: darwin-arm64
-          #   asset_os: macos
-          #   asset_arch: arm64
-          #   input_artifact: ramble-darwin-arm64
-          #   input_binary: ramble
-          #   output_archive: ramble-macos-arm64.tar.gz
-          #   archive_command: tar czvf
-
-    steps:
-    - name: Download application artifact (${{ matrix.platform }})
-      uses: actions/download-artifact@v4
+    - name: Upload Package Artifact
+      uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.input_artifact }}
-        path: ./release-staging
+        name: ramble-linux-package
+        path: ./ramble-linux-amd64.tar.gz
 
-    - name: Download Models
-      run: |
-        mkdir -p ./release-staging/models
-        curl -L -o ./release-staging/models/${{ env.MODEL_TINY_NAME }} ${{ env.MODEL_TINY_URL }}
-        # Add other models if needed, e.g.:
-        # curl -L -o ./release-staging/models/${{ env.MODEL_SMALL_NAME }} ${{ env.MODEL_SMALL_URL }}
-
-    - name: Add README and LICENSE (Optional)
-      run: |
-        # Assuming README.md and potentially LICENSE exist at the root
-        cp README.md ./release-staging/README.md || echo "README.md not found"
-        # cp LICENSE ./release-staging/LICENSE || echo "LICENSE not found"
-
-    - name: Create Release Archive (${{ matrix.output_archive }})
-      working-directory: ./release-staging
-      # Use specific archive command based on matrix
-      run: ${{ matrix.archive_command }} ../${{ matrix.output_archive }} .
-
-    - name: Upload Release Asset (${{ matrix.output_archive }})
+    # Only when this is a release
+    - name: Upload Release Asset (Linux)
+      if: github.event_name == 'release'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./${{ matrix.output_archive }}
-        asset_name: ${{ matrix.output_archive }}
-        asset_content_type: application/octet-stream # Or specific type like application/zip
+        asset_path: ./ramble-linux-amd64.tar.gz
+        asset_name: ramble-linux-amd64.tar.gz
+        asset_content_type: application/gzip
