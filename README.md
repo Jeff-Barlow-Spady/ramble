@@ -132,3 +132,9 @@ Place platform-specific libraries in:
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+## CI/CD Status
+
+GitHub Actions is configured to build and release the application using Docker for a consistent build environment. The main workflow builds the application for Linux platforms, with Windows and macOS builds to be added later.
+
+The current build status can be found in the GitHub Actions tab.
