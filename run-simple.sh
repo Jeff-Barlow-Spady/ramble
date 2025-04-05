@@ -18,6 +18,17 @@ if [ ! -f "libwhisper.so" ] && [ -f "${WHISPER_DIR}/build/src/libwhisper.so" ]; 
     ln -sf "${WHISPER_DIR}/build/src/libwhisper.so" libwhisper.so
 fi
 
+# Check if GGML libraries exist and create symlinks if needed
+for lib in ${WHISPER_DIR}/build/ggml/src/libggml*.so; do
+    if [ -f "$lib" ]; then
+        libname=$(basename "$lib")
+        if [ ! -f "$libname" ]; then
+            echo "Creating symlink for $libname..."
+            ln -sf "$lib" "$libname"
+        fi
+    fi
+done
+
 # Set up the library path
 export LD_LIBRARY_PATH="$(pwd):$(pwd)/${WHISPER_DIR}/build/src:$(pwd)/${WHISPER_DIR}/build/ggml/src:$LD_LIBRARY_PATH"
 

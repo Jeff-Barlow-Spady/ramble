@@ -19,7 +19,7 @@ env:
   GO_VERSION: '1.21' # Use a stable Go version
 
 jobs:
-  docker-build:
+  build:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout Repository
@@ -27,52 +27,44 @@ jobs:
       with:
         submodules: 'recursive'  # Properly check out submodules
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
 
-    - name: Build Docker Image
+    - name: Install Dependencies
       run: |
-        docker build -t ramble-builder -f Dockerfile.build .
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake build-essential \
+          libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+          libgl1-mesa-dev xorg-dev \
+          portaudio19-dev libasound2-dev libayatana-appindicator3-dev
 
-    - name: Extract Build Artifacts
+    - name: Validate Build Scripts
       run: |
-        # Create a temporary container
-        CONTAINER_ID=$(docker create ramble-builder)
+        chmod +x build-simple.sh run-simple.sh
+        ls -la third_party/whisper.cpp
+        git submodule status
 
-        # Create directory
-        mkdir -p ./dist
-
-        # Extract the binary
-        docker cp $CONTAINER_ID:/app/ramble ./dist/
-
-        # Extract required libraries
-        docker cp $CONTAINER_ID:/usr/local/lib/libwhisper.so ./dist/
-        docker cp $CONTAINER_ID:/usr/local/lib/libggml.so ./dist/ || true
-        docker cp $CONTAINER_ID:/usr/local/lib/libggml-base.so ./dist/ || true
-        docker cp $CONTAINER_ID:/usr/local/lib/libggml-cpu.so ./dist/ || true
-
-        # Remove the temporary container
-        docker rm $CONTAINER_ID
-
-        # List extracted files
-        ls -la ./dist
+    - name: Build Application
+      run: |
+        ./build-simple.sh
+        ls -la
+        # Verify binary and libraries exist
+        file ./ramble
+        file ./libwhisper.so
 
     - name: Prepare Release Package
       run: |
         mkdir -p ./release
 
         # Copy binary and libraries
-        cp ./dist/ramble ./release/
-        cp ./dist/*.so ./release/ || true
+        cp ./ramble ./release/
+        cp ./*.so ./release/ || true
 
         # Create launcher script
-        cat > ./release/run.sh << 'EOL'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export LD_LIBRARY_PATH="$SCRIPT_DIR:$LD_LIBRARY_PATH"
-"$SCRIPT_DIR/ramble" "$@"
-EOL
-        chmod +x ./release/run.sh
+        cp ./run-simple.sh ./release/run.sh
 
         # Download model for testing
         mkdir -p ./release/models

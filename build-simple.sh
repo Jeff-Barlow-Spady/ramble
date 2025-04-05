@@ -40,7 +40,7 @@ echo "3. Building Go application..."
 # Set environment variables for building
 export CGO_ENABLED=1
 export CGO_CFLAGS="-I$(pwd)/${WHISPER_DIR}/include -I$(pwd)/${WHISPER_DIR}/ggml/include"
-export CGO_LDFLAGS="-L$(pwd)/${WHISPER_DIR}/build/src -L$(pwd)/${WHISPER_DIR}/build/ggml/src -lwhisper"
+export CGO_LDFLAGS="-L$(pwd)/${WHISPER_DIR}/build/src -L$(pwd)/${WHISPER_DIR}/build/ggml/src -lwhisper -lggml -lggml-base -lggml-cpu"
 export LD_LIBRARY_PATH="$(pwd):$(pwd)/${WHISPER_DIR}/build/src:$(pwd)/${WHISPER_DIR}/build/ggml/src:$LD_LIBRARY_PATH"
 
 # Build the Go application
