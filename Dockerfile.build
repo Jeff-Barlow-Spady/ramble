@@ -1,4 +1,4 @@
-FROM golang:1.21-bullseye
+FROM golang:1.23-bullseye
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -17,41 +17,40 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /build
 
-# Copy only go.mod and go.sum first to leverage Docker cache
-COPY go.mod go.sum ./
-RUN go mod download
-
-# Build whisper.cpp in a subdirectory
-WORKDIR /app/third_party
-RUN mkdir -p whisper.cpp
-RUN git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git whisper.cpp
-WORKDIR /app/third_party/whisper.cpp
-RUN mkdir -p build && \
+# Clone whisper.cpp and build it
+RUN git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git && \
+    cd whisper.cpp && \
+    mkdir -p build && \
     cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release \
-          -DWHISPER_BUILD_SHARED=ON \
+          -DBUILD_SHARED_LIBS=ON \
           -DWHISPER_BUILD_EXAMPLES=OFF \
+          -DWHISPER_BUILD_TESTS=OFF \
+          -DWHISPER_BUILD_TOOLS=OFF \
           .. && \
-    cmake --build . --parallel
+    cmake --build . --parallel && \
+    cd /build
 
-# Create directories needed for libraries
+# Copy the application source code
+COPY . /app
 WORKDIR /app
-RUN mkdir -p libs/include libs/lib
 
-# Copy headers and libraries
-RUN cp third_party/whisper.cpp/include/whisper.h libs/include/ && \
-    cp third_party/whisper.cpp/build/src/libwhisper.so libs/lib/
-
-# Now copy the rest of the code
-COPY . .
+# Prepare library and include directories
+RUN mkdir -p libs/include libs/lib && \
+    cp /build/whisper.cpp/include/whisper.h libs/include/ && \
+    cp /build/whisper.cpp/ggml/include/ggml.h libs/include/ && \
+    cp /build/whisper.cpp/ggml/include/ggml-alloc.h libs/include/ && \
+    cp /build/whisper.cpp/build/src/libwhisper.so libs/lib/
 
 # Build the application
 ENV CGO_ENABLED=1
 ENV CGO_CFLAGS="-I/app/libs/include"
 ENV CGO_LDFLAGS="-L/app/libs/lib -lwhisper"
-ENV LD_LIBRARY_PATH="/app/libs/lib:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="/app/libs/lib"
 
-# Default command builds the application
-CMD ["go", "build", "-v", "-tags=whisper_go", "-o", "ramble", "./cmd/ramble"]
+RUN go build -v -tags=whisper_go -o ramble ./cmd/ramble
+
+# This is the default command that's run when the container starts
+CMD ["/app/ramble"]
