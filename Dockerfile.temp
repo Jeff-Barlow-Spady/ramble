@@ -1,0 +1,51 @@
+FROM golang:1.23-bullseye
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    cmake build-essential \
+    libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+    libgl1-mesa-dev xorg-dev \
+    portaudio19-dev libasound2-dev libayatana-appindicator3-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Copy source code
+WORKDIR /app
+COPY . .
+
+# Setup and build whisper.cpp
+RUN mkdir -p third_party && \
+    cd third_party && \
+    git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git && \
+    cd whisper.cpp && \
+    mkdir -p build && \
+    cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    cmake --build . --parallel
+
+# Build the Go application
+RUN export CGO_ENABLED=1 && \
+    export CGO_CFLAGS="-I/app/third_party/whisper.cpp/include" && \
+    export CGO_LDFLAGS="-L/app/third_party/whisper.cpp/build/src -lwhisper" && \
+    export LD_LIBRARY_PATH="/app/third_party/whisper.cpp/build/src" && \
+    go build -v -tags=whisper_go -o /app/ramble ./cmd/ramble
+
+# Start with a clean, small runtime image
+FROM debian:bullseye-slim
+
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6 \
+    libgl1 \
+    portaudio19-dev libasound2 libayatana-appindicator3-1 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Copy the binary and library from the builder
+COPY --from=0 /app/ramble /app/ramble
+COPY --from=0 /app/third_party/whisper.cpp/build/src/libwhisper.so /usr/local/lib/
+
+# Set up library path
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+# Run the application
+WORKDIR /app
+ENTRYPOINT ["/app/ramble"]
