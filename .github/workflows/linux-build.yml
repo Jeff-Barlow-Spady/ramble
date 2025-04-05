@@ -2,9 +2,9 @@ name: Build Ramble Linux Package
 
 on:
   push:
-    branches: [ main, correction ]
+    branches: [ main, correction, working ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, working ]
   release:
     types: [ created ]
   workflow_dispatch:  # Allow manual triggering of the workflow
@@ -33,12 +33,17 @@ jobs:
         # Create a temporary container
         CONTAINER_ID=$(docker create ramble-builder)
 
-        # Create directories
+        # Create directory
         mkdir -p ./dist
 
-        # Extract the binary and library
+        # Extract the binary
         docker cp $CONTAINER_ID:/app/ramble ./dist/
-        docker cp $CONTAINER_ID:/app/libs/lib/libwhisper.so ./dist/
+
+        # Extract required libraries
+        docker cp $CONTAINER_ID:/usr/local/lib/libwhisper.so ./dist/
+        docker cp $CONTAINER_ID:/usr/local/lib/libggml.so ./dist/ || true
+        docker cp $CONTAINER_ID:/usr/local/lib/libggml-base.so ./dist/ || true
+        docker cp $CONTAINER_ID:/usr/local/lib/libggml-cpu.so ./dist/ || true
 
         # Remove the temporary container
         docker rm $CONTAINER_ID
@@ -50,9 +55,9 @@ jobs:
       run: |
         mkdir -p ./release
 
-        # Copy binary and library
+        # Copy binary and libraries
         cp ./dist/ramble ./release/
-        cp ./dist/libwhisper.so ./release/
+        cp ./dist/*.so ./release/ || true
 
         # Create launcher script
         cat > ./release/run.sh << 'EOL'
