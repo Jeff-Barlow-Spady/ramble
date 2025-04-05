@@ -24,18 +24,26 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Build with Docker
+    - name: Build Docker Image
       run: |
-        # Build the application using Docker
         docker build -t ramble-builder -f Dockerfile.build .
 
-        # Create output directory
+    - name: Extract Build Artifacts
+      run: |
+        # Create a temporary container
+        CONTAINER_ID=$(docker create ramble-builder)
+
+        # Create directories
         mkdir -p ./dist
 
-        # Extract build artifacts
-        docker run --rm -v $(pwd)/dist:/output ramble-builder bash -c 'go build -v -tags=whisper_go -o /output/ramble ./cmd/ramble && cp libs/lib/libwhisper.so /output/'
+        # Extract the binary and library
+        docker cp $CONTAINER_ID:/app/ramble ./dist/
+        docker cp $CONTAINER_ID:/app/libs/lib/libwhisper.so ./dist/
 
-        # Verify the output
+        # Remove the temporary container
+        docker rm $CONTAINER_ID
+
+        # List extracted files
         ls -la ./dist
 
     - name: Prepare Release Package

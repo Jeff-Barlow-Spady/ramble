@@ -1,58 +1,64 @@
-FROM golang:1.23-bullseye
+FROM golang:1.23-bullseye AS builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    cmake \
-    build-essential \
-    libx11-dev \
-    libxrandr-dev \
-    libxinerama-dev \
-    libxcursor-dev \
-    libxi-dev \
-    libgl1-mesa-dev \
-    xorg-dev \
-    portaudio19-dev \
-    libasound2-dev \
-    libayatana-appindicator3-dev \
+    cmake build-essential \
+    libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+    libgl1-mesa-dev xorg-dev \
+    portaudio19-dev libasound2-dev libayatana-appindicator3-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
-
-# Clone whisper.cpp and build it
-RUN git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git && \
-    cd whisper.cpp && \
-    mkdir -p build && \
-    cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release \
-          -DBUILD_SHARED_LIBS=ON \
-          -DWHISPER_BUILD_EXAMPLES=OFF \
-          -DWHISPER_BUILD_TESTS=OFF \
-          -DWHISPER_BUILD_TOOLS=OFF \
-          .. && \
-    cmake --build . --parallel && \
-    cd /build
-
-# Copy the application source code
-COPY . /app
 WORKDIR /app
 
-# Prepare library and include directories - copy ALL headers
-RUN mkdir -p libs/include libs/lib && \
-    # Copy all whisper.cpp includes
-    cp -r /build/whisper.cpp/include/* libs/include/ && \
-    # Copy all ggml includes
-    cp -r /build/whisper.cpp/ggml/include/* libs/include/ && \
-    # Copy the shared library
-    cp /build/whisper.cpp/build/src/libwhisper.so libs/lib/
+# Copy only what's needed for building whisper.cpp first
+COPY third_party/whisper.cpp /app/third_party/whisper.cpp
 
-# Build the application
-ENV CGO_ENABLED=1
-ENV CGO_CFLAGS="-I/app/libs/include"
-ENV CGO_LDFLAGS="-L/app/libs/lib -lwhisper"
-ENV LD_LIBRARY_PATH="/app/libs/lib"
+# Build whisper.cpp
+RUN cd /app/third_party/whisper.cpp && \
+    mkdir -p build && \
+    cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    cmake --build . --parallel && \
+    # Show what was built
+    find . -name "*.so" -o -name "*.a"
 
-RUN go build -v -tags=whisper_go -o ramble ./cmd/ramble
+# Now copy the rest of the app and build it
+COPY . /app
 
-# This is the default command that's run when the container starts
-CMD ["/app/ramble"]
+# Create symlinks for libraries
+RUN ln -sf /app/third_party/whisper.cpp/build/src/libwhisper.so /app/libwhisper.so && \
+    ln -sf /app/third_party/whisper.cpp/include/whisper.h /app/whisper.h && \
+    for lib in /app/third_party/whisper.cpp/build/ggml/src/libggml*.so; do \
+        ln -sf $lib /app/$(basename $lib); \
+    done
+
+# Build the Go application
+RUN export CGO_ENABLED=1 && \
+    export CGO_CFLAGS="-I/app/third_party/whisper.cpp/include -I/app/third_party/whisper.cpp/ggml/include" && \
+    export CGO_LDFLAGS="-L/app/third_party/whisper.cpp/build/src -L/app/third_party/whisper.cpp/build/ggml/src -lwhisper -lggml -lggml-base -lggml-cpu" && \
+    export LD_LIBRARY_PATH="/app:/app/third_party/whisper.cpp/build/src:/app/third_party/whisper.cpp/build/ggml/src" && \
+    go build -v -tags=whisper_go -o /app/ramble ./cmd/ramble
+
+# Start with a clean, small runtime image
+FROM debian:bullseye-slim
+
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6 \
+    libgl1 \
+    portaudio19-dev libasound2 libayatana-appindicator3-1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the binary and libraries from the builder
+COPY --from=builder /app/ramble /app/ramble
+COPY --from=builder /app/third_party/whisper.cpp/build/src/libwhisper.so /usr/local/lib/
+COPY --from=builder /app/third_party/whisper.cpp/build/ggml/src/libggml*.so /usr/local/lib/
+
+# Set up library path
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+# Run the application
+WORKDIR /app
+ENTRYPOINT ["/app/ramble"]

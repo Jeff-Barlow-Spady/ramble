@@ -1,0 +1,19 @@
+# Exclude the whisper.cpp build directory to avoid CMake cache conflicts
+third_party/whisper.cpp/build/
+**/third_party/whisper.cpp/build/
+
+# Exclude common directories not needed for the build
+.git/
+.vscode/
+.cursor/
+dist/
+models/
+test-models/
+
+# Exclude binaries and libraries from source
+*.so
+*.a
+*.o
+*.obj
+*.exe
+ramble
