@@ -37,11 +37,13 @@ RUN git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git && \
 COPY . /app
 WORKDIR /app
 
-# Prepare library and include directories
+# Prepare library and include directories - copy ALL headers
 RUN mkdir -p libs/include libs/lib && \
-    cp /build/whisper.cpp/include/whisper.h libs/include/ && \
-    cp /build/whisper.cpp/ggml/include/ggml.h libs/include/ && \
-    cp /build/whisper.cpp/ggml/include/ggml-alloc.h libs/include/ && \
+    # Copy all whisper.cpp includes
+    cp -r /build/whisper.cpp/include/* libs/include/ && \
+    # Copy all ggml includes
+    cp -r /build/whisper.cpp/ggml/include/* libs/include/ && \
+    # Copy the shared library
     cp /build/whisper.cpp/build/src/libwhisper.so libs/lib/
 
 # Build the application
