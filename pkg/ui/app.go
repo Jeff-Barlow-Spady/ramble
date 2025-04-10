@@ -20,6 +20,7 @@ import (
 	"github.com/jeff-barlow-spady/ramble/pkg/clipboard"
 	"github.com/jeff-barlow-spady/ramble/pkg/logger"
 	"github.com/jeff-barlow-spady/ramble/pkg/resources"
+	"github.com/jeff-barlow-spady/ramble/pkg/transcription"
 )
 
 // AppState represents the current state of the application
@@ -66,7 +67,8 @@ type App struct {
 	// For managing finalized segments
 	pendingSegment        string
 	finalizedSegmentTexts []string
-	currentSessionText    string // Accumulates text for the current recording session
+	currentSessionText    string                                  // Accumulates text for the current recording session
+	textAccumulator       *transcription.TranscriptionAccumulator // Added for better separation of concerns
 }
 
 // New creates a new UI application
@@ -108,6 +110,7 @@ func NewWithOptions(testMode bool) *App {
 		currentPreferences:    prefs,
 		keyHandlerEnabled:     true,
 		finalizedSegmentTexts: make([]string, 0),
+		textAccumulator:       transcription.NewAccumulator(), // Initialize our accumulator
 	}
 
 	// Set up window close event to minimize instead of quit
@@ -607,6 +610,9 @@ func (a *App) clearTranscript() {
 	a.pendingSegment = ""
 	a.currentSessionText = ""
 
+	// Reset the text accumulator
+	a.textAccumulator.Reset()
+
 	// Clear the finalized segments
 	a.finalizedSegmentTexts = make([]string, 0)
 
@@ -735,13 +741,11 @@ func (a *App) AppendSessionText(text string) {
 	// Show raw model output in the streaming preview (what the model is currently processing)
 	a.streamingPreview.SetText(text)
 
-	// For the current session, simply accumulate text with proper spacing
-	if a.currentSessionText == "" {
-		a.currentSessionText = text
-	} else {
-		// Trust the manager.go's output and just append with spacing
-		a.currentSessionText += " " + text
-	}
+	// Use the TranscriptionAccumulator to handle text accumulation
+	a.textAccumulator.AppendText(text)
+
+	// Update our internal state to match the accumulator
+	a.currentSessionText = a.textAccumulator.GetText()
 }
 
 // FinalizeTranscriptionSegment adds the current session text to the finalized segments
@@ -754,6 +758,7 @@ func (a *App) FinalizeTranscriptionSegment() {
 
 	finalText := a.currentSessionText
 	a.currentSessionText = "" // Reset for the next session
+	a.textAccumulator.Reset() // Reset the accumulator for the next session
 
 	// Clear the streaming preview
 	a.streamingPreview.SetText("")
